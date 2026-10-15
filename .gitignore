@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+.venv/
+venv/
+__pycache__/
+*.pyc
+
+# Build
+dist/
+build/
+*.egg-info/
+
+# Secrets & Config
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+config.local.*
+secrets.*
+
+# Logs & Data
+logs/
+*.log
+data/
+*.csv
+*.parquet
+*.db
+*.sqlite
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
