@@ -1,0 +1,48 @@
+# Betriebsmodus: paper | live  (die Umgebungsvariable TRADING_MODE ueberschreibt diesen Wert)
+mode: paper
+
+# ccxt-Boersen-ID, z. B. binance, kraken, bybit, okx, coinbase, bitget
+exchange: binance
+
+# Handelspaare (Spot). Die Quote-Waehrung muss bei allen Paaren gleich sein.
+symbols:
+  - BTC/USDT
+  - ETH/USDT
+quote_currency: USDT
+
+# Kerzen-Zeitrahmen fuer die Strategie (1m, 5m, 15m, 1h, 4h, 1d ...)
+timeframe: 1h
+
+# Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
+# Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
+poll_interval_seconds: 60
+
+# Verzeichnis fuer Zustand (offene Positionen, Trade-Historie) und Logs
+state_dir: state
+log_dir: logs
+
+paper:
+  starting_balance: 1000.0   # in Quote-Waehrung
+  fee_pct: 0.1               # Handelsgebuehr pro Order in Prozent
+  slippage_pct: 0.05         # angenommene Kursabweichung bei Market-Orders in Prozent
+
+strategy:
+  name: ema_cross
+  fast_ema: 20
+  slow_ema: 50
+  rsi_period: 14
+  rsi_max_entry: 70          # kein Einstieg, wenn der Markt bereits ueberkauft ist
+  atr_period: 14
+  stop_atr_mult: 2.0         # Stop-Loss = Einstieg - 2 * ATR
+  take_profit_atr_mult: 4.0  # Take-Profit = Einstieg + 4 * ATR (0 = deaktiviert)
+  trailing_stop: true        # Stop-Loss zieht bei steigenden Kursen nach
+
+risk:
+  risk_per_trade_pct: 1.0    # max. Verlust pro Trade (Abstand zum Stop) in % des Kapitals
+  max_position_pct: 25.0     # max. Positionsgroesse in % des Kapitals
+  max_open_positions: 3
+  max_daily_loss_pct: 3.0    # ab diesem Tagesverlust keine neuen Einstiege mehr bis zum naechsten Tag
+  min_order_quote: 10.0      # kleinere Orders werden nicht platziert
+
+notifications:
+  telegram_enabled: false

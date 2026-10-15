@@ -33,3 +33,6 @@ data/
 .idea/
 .DS_Store
 Thumbs.db
+
+# Bot-Laufzeitdaten
+state/
