@@ -5,6 +5,7 @@ import logging
 import signal
 import sys
 import threading
+import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
@@ -97,6 +98,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             server = DashboardServer(bot.get_snapshot, {"pause": bot.pause, "resume": bot.resume}, port=port)
             server.start()
             log.info("Dashboard: %s (nur von diesem Rechner erreichbar)", server.url)
+            if args.open:
+                webbrowser.open(server.url)
         except OSError as exc:
             log.warning("Dashboard konnte nicht starten (%s). Der Bot laeuft ohne Dashboard weiter.", exc)
     try:
@@ -262,6 +265,7 @@ def main(argv: list[str] | None = None) -> int:
     p_run.add_argument("--once", action="store_true", help="nur einen Zyklus ausfuehren")
     p_run.add_argument("--no-dashboard", action="store_true", help="Dashboard nicht starten")
     p_run.add_argument("--port", type=int, help="Dashboard-Port (Standard aus config.yaml)")
+    p_run.add_argument("--open", action="store_true", help="Dashboard im Browser oeffnen")
     p_run.set_defaults(func=cmd_run)
 
     p_dash = sub.add_parser("dashboard", help="Dashboard nur als Ansicht starten (liest den gespeicherten Zustand)")

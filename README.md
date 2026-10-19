@@ -31,7 +31,21 @@ und begrenzt das Risiko pro Trade und pro Tag.
   Abgleich mit dem echten Bestand beim Start, Netzwerkfehler brechen den Bot nicht ab,
   Rotating-Logs, optional Telegram-Benachrichtigungen, Docker-Setup für 24/7.
 
-## Installation
+## Schnellstart per Doppelklick
+
+Voraussetzung ist Python 3.11 oder neuer. Bei der Installation von Python unter Windows das Häkchen
+„Add Python to PATH“ setzen.
+
+| Schritt | Windows | Mac / Linux |
+|---|---|---|
+| Einmal installieren | `install.bat` | `./install.sh` |
+| Beste Strategie finden | `vergleich.bat` | `./vergleich.sh` |
+| Bot starten, Papierhandel | `start.bat` | `./start.sh` |
+
+`start.bat` öffnet das Dashboard automatisch im Browser. Beenden mit Strg+C. Der Rechner darf dabei nicht in
+den Ruhemodus gehen. Die Windows-Dateien sind nicht auf einem echten Windows-System getestet, die Mac/Linux-Skripte schon.
+
+## Installation von Hand
 
 Voraussetzung: Python 3.11 oder neuer.
 
