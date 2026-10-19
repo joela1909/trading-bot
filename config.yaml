@@ -46,3 +46,9 @@ risk:
 
 notifications:
   telegram_enabled: false
+
+# Lokales Dashboard im Browser: http://127.0.0.1:<port>
+# Es ist nur von diesem Rechner aus erreichbar (Loopback), nicht aus dem Netzwerk.
+dashboard:
+  enabled: true
+  port: 8765

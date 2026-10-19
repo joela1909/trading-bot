@@ -48,6 +48,11 @@ class NotificationConfig(BaseModel):
     telegram_enabled: bool = False
 
 
+class DashboardConfig(BaseModel):
+    enabled: bool = True
+    port: int = Field(default=8765, ge=0, le=65535)
+
+
 class BotConfig(BaseModel):
     mode: Mode = "paper"
     exchange: str = "binance"
@@ -61,6 +66,7 @@ class BotConfig(BaseModel):
     strategy: StrategyConfig = Field(default_factory=StrategyConfig)
     risk: RiskConfig = Field(default_factory=RiskConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
+    dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
 
     @field_validator("symbols")
     @classmethod

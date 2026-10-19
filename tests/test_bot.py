@@ -119,3 +119,50 @@ def test_reconcile_drops_position_sold_manually(settings, tmp_path):
     broker.balances["BTC"] = 0.0
     bot.reconcile()
     assert not bot.state.positions
+
+
+def test_pause_blocks_new_entries_but_manages_positions(settings, tmp_path):
+    full = make_ohlcv(trend_closes())
+    strategy = build_strategy(settings.bot.strategy)
+    buy_i = _first_buy_index(strategy, full)
+    feed = FakeFeed(full.iloc[: buy_i + 1].reset_index(drop=True))
+    bot, _, _ = _make_bot(settings, feed, tmp_path)
+    bot.pause()
+    bot.run_once()
+    assert not bot.state.positions
+    assert BotState.load(tmp_path / "state.json").entries_paused
+
+    bot.resume()
+    bot.state.last_candle_ts.clear()
+    bot.run_once()
+    assert "BTC/USDT" in bot.state.positions
+
+    bot.pause()
+    pos = bot.state.positions["BTC/USDT"]
+    feed.price = pos.stop_loss * 0.99
+    bot.run_once()
+    assert not bot.state.positions, "Stop-Loss muss trotz Pause greifen"
+
+
+def test_cycle_builds_snapshot_and_records_equity(settings, tmp_path):
+    full = make_ohlcv(trend_closes())
+    strategy = build_strategy(settings.bot.strategy)
+    buy_i = _first_buy_index(strategy, full)
+    feed = FakeFeed(full.iloc[: buy_i + 1].reset_index(drop=True))
+    bot, _, _ = _make_bot(settings, feed, tmp_path)
+    bot.run_once()
+    snap = bot.get_snapshot()
+    assert snap["mode"] == "paper" and snap["equity"] == pytest.approx(1000.0, abs=2.0)
+    assert snap["positions"] and snap["positions"][0]["price"] == feed.price
+    assert len(bot.state.equity_history) == 1
+    bot.run_once()
+    assert len(bot.state.equity_history) == 1, "Punkte nur alle 5 Minuten"
+
+
+def test_equity_history_is_thinned_when_too_long(settings, tmp_path):
+    feed = FakeFeed(make_ohlcv(trend_closes()))
+    bot, _, _ = _make_bot(settings, feed, tmp_path)
+    bot.state.equity_history = [[f"2020-01-01T00:00:{i % 60:02d}+00:00", float(i)] for i in range(bot.EQUITY_MAX_POINTS)]
+    bot._record_equity(1234.0)
+    assert len(bot.state.equity_history) < bot.EQUITY_MAX_POINTS
+    assert bot.state.equity_history[-1][1] == 1234.0

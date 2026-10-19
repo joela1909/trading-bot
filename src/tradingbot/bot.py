@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import math
+import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
@@ -12,6 +13,7 @@ from .exchange import Broker
 from .models import Position, Signal, Trade, utcnow_iso
 from .notify import Notifier
 from .risk import RiskManager
+from .snapshot import make_snapshot
 from .state import BotState
 from .strategy import Strategy
 
@@ -40,6 +42,13 @@ class TradingBot:
         self.notifier = notifier
         self.state_path = Path(state_path)
         self._stop = False
+        self._save_lock = threading.Lock()
+        self.last_prices: dict[str, float] = {}
+        self.last_equity: float | None = None
+        self.last_free_quote: float | None = None
+        self.last_cycle: str | None = None
+        self.running = False
+        self._snapshot: dict | None = None
 
     # ----------------------------------------------------------------- helpers
     def equity(self, prices: dict[str, float] | None = None) -> float:
@@ -50,7 +59,58 @@ class TradingBot:
         return eq
 
     def _save(self) -> None:
-        self.state.save(self.state_path)
+        with self._save_lock:
+            self.state.save(self.state_path)
+
+    EQUITY_POINT_SECONDS = 300
+    EQUITY_MAX_POINTS = 6000
+
+    def _record_equity(self, equity: float) -> None:
+        history = self.state.equity_history
+        now = datetime.now(timezone.utc)
+        if history:
+            try:
+                last = datetime.fromisoformat(history[-1][0])
+                if (now - last).total_seconds() < self.EQUITY_POINT_SECONDS:
+                    return
+            except ValueError:
+                pass
+        history.append([now.isoformat(timespec="seconds"), round(equity, 4)])
+        if len(history) > self.EQUITY_MAX_POINTS:
+            half = len(history) // 2
+            history[:] = history[:half:2] + history[half:]
+
+    def build_snapshot(self) -> dict:
+        self._snapshot = make_snapshot(
+            state=self.state,
+            mode=self.broker.name,
+            exchange=self.cfg.exchange,
+            timeframe=self.cfg.timeframe,
+            quote=self.cfg.quote_currency,
+            symbols=self.cfg.symbols,
+            equity=self.last_equity,
+            free_quote=self.last_free_quote,
+            prices=self.last_prices,
+            last_cycle=self.last_cycle,
+            running=self.running,
+            controls=True,
+        )
+        return self._snapshot
+
+    def get_snapshot(self) -> dict:
+        return self._snapshot or self.build_snapshot()
+
+    def pause(self) -> dict:
+        self.state.entries_paused = True
+        self._save()
+        log.warning("Neue Einstiege pausiert (Dashboard)")
+        return self.build_snapshot()
+
+    def resume(self) -> dict:
+        self.state.entries_paused = False
+        self._save()
+        log.warning("Neue Einstiege wieder aktiv (Dashboard)")
+        return self.build_snapshot()
 
     def _roll_day(self, equity: float) -> None:
         today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
@@ -97,8 +157,19 @@ class TradingBot:
             except Exception:  # noqa: BLE001
                 log.exception("Fehler bei %s", symbol)
 
+        final_equity = self.equity(prices) if prices else equity
+        self.last_prices = dict(prices)
+        self.last_equity = final_equity
+        try:
+            self.last_free_quote = self.broker.balance_quote()
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Guthaben nicht abrufbar: %s", exc)
+        self.last_cycle = utcnow_iso()
+        if prices:
+            self._record_equity(final_equity)
         self._save()
-        return self.equity(prices) if prices else equity
+        self.build_snapshot()
+        return final_equity
 
     def process_symbol(self, symbol: str, price: float) -> None:
         df = self.feed.fetch_ohlcv(symbol, self.cfg.timeframe, limit=self.strategy.warmup_bars + 10)
@@ -143,6 +214,9 @@ class TradingBot:
         decision = self.strategy.decide(df)
         if decision.signal != Signal.BUY:
             log.debug("%s: %s (%s)", symbol, decision.signal.value, decision.reason)
+            return
+        if self.state.entries_paused:
+            log.info("%s: Kaufsignal ignoriert, Einstiege pausiert", symbol)
             return
         if self.state.entries_halted_for_day:
             log.info("%s: Kaufsignal ignoriert, Tagesverlustlimit erreicht", symbol)
@@ -226,6 +300,8 @@ class TradingBot:
 
     def run_forever(self) -> None:
         self.reconcile()
+        self.running = True
+        self.build_snapshot()
         self.notifier.send(
             f"Bot gestartet ({self.broker.name}-Modus, {self.cfg.exchange}, {', '.join(self.cfg.symbols)}, {self.cfg.timeframe})"
         )
@@ -244,4 +320,6 @@ class TradingBot:
             while remaining > 0 and not self._stop:
                 time.sleep(min(1.0, remaining))
                 remaining -= 1.0
+        self.running = False
+        self.build_snapshot()
         self.notifier.send(f"Bot gestoppt um {utcnow_iso()}")

@@ -23,6 +23,8 @@ und begrenzt das Risiko pro Trade und pro Tag.
   maximale Anzahl offener Positionen, Tagesverlustlimit, Mindestordergröße der Börse.
 - **Backtesting** auf historischen Daten (Download von der Börse oder CSV) mit Rendite,
   Drawdown, Trefferquote, Profitfaktor und Vergleich zu Buy & Hold.
+- **Lokales Dashboard** im Browser: Kapitalverlauf, offene Positionen, Trades, Kennzahlen und ein
+  Schalter zum Pausieren neuer Einstiege. Nur von deinem eigenen Rechner aus erreichbar.
 - **Robuster Betrieb**: Zustand (Positionen, Trades) wird auf Platte gespeichert und übersteht Neustarts,
   Abgleich mit dem echten Bestand beim Start, Netzwerkfehler brechen den Bot nicht ab,
   Rotating-Logs, optional Telegram-Benachrichtigungen, Docker-Setup für 24/7.
@@ -50,6 +52,8 @@ Der Bot lädt `config.yaml`, holt sich Kurse von der eingestellten Börse (ohne 
 simuliert mit 1000 USDT Startkapital und schreibt Zustand nach `state/` und Logs nach `logs/`.
 Beenden mit `Ctrl+C`.
 
+Das Dashboard startet automatisch und ist unter http://127.0.0.1:8765 erreichbar (siehe unten).
+
 Status anzeigen:
 
 ```bash
@@ -61,6 +65,38 @@ Einen einzelnen Zyklus ausführen (z. B. zum Testen der Verbindung):
 ```bash
 tradingbot run --once
 ```
+
+## Dashboard
+
+Beim Start mit `tradingbot run` öffnet der Bot ein Dashboard unter **http://127.0.0.1:8765**.
+Es zeigt Kapital, Rendite, Tagesverlauf, Kapitalverlauf als Diagramm, offene Positionen mit
+aktuellem Gewinn/Verlust, die letzten Trades und die Kennzahlen. Der Modus (Papierhandel oder
+**LIVE**) steht dauerhaft im Kopf der Seite und im Tab-Titel. Die Seite aktualisiert sich alle 5 Sekunden
+und folgt dem Hell/Dunkel-Modus deines Systems.
+
+Der Button **Einstiege pausieren** stoppt nur neue Käufe. Offene Positionen laufen weiter mit
+Stop-Loss, Take-Profit und Trailing-Stop. Die Pause wird gespeichert und gilt nach einem Neustart weiter.
+
+Sicherheit:
+
+- Der Server bindet ausschließlich an `127.0.0.1`. Eine andere Adresse wird abgelehnt, das Dashboard ist aus dem
+  Netzwerk nicht erreichbar.
+- Anfragen mit fremdem Host- oder Origin-Header werden abgelehnt (Schutz gegen Zugriffe von fremden Webseiten
+  aus deinem Browser). Die Seite lädt keine externen Skripte oder Schriften.
+- Das Dashboard kann nur pausieren und fortsetzen. Es kann keine Einstellungen ändern, keine Orders auslösen
+  und zeigt keine API-Keys.
+
+Optionen:
+
+```bash
+tradingbot run --port 9000          # anderer Port
+tradingbot run --no-dashboard       # ohne Dashboard
+tradingbot dashboard                # nur Ansicht des gespeicherten Stands, wenn der Bot in einem anderen Fenster läuft
+```
+
+Dauerhaft ändern lässt sich das im Abschnitt `dashboard` der `config.yaml`. Mit Docker ist das Dashboard
+nicht erreichbar, weil es nur an den Loopback-Port im Container bindet. Für die lokale Nutzung auf dem PC
+den Bot direkt starten (nicht per Docker).
 
 ## Backtest
 
@@ -147,6 +183,9 @@ src/tradingbot/
 ├── cli.py            Kommandozeile: run, backtest, status
 ├── bot.py            Handelsschleife, Positionsverwaltung, Tagesverlustlimit
 ├── backtest.py       Backtester mit Kennzahlen
+├── dashboard.py      Lokaler Webserver (nur Loopback) für das Dashboard
+├── dashboard_page.py HTML, CSS und JavaScript des Dashboards
+├── snapshot.py       Datenstand für das Dashboard (Kennzahlen, Positionen, Verlauf)
 ├── config.py         config.yaml + .env (pydantic)
 ├── data.py           Marktdaten über ccxt, CSV-Import
 ├── exchange.py       PaperBroker (Simulation) und LiveBroker (ccxt)

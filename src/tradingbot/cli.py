@@ -4,17 +4,20 @@ import argparse
 import logging
 import signal
 import sys
+import threading
 from datetime import datetime, timezone
 from pathlib import Path
 
 from .backtest import Backtester
 from .bot import TradingBot
 from .config import Settings, load_settings
+from .dashboard import DashboardServer
 from .data import CcxtDataFeed, load_csv
 from .exchange import LiveBroker, PaperBroker
 from .logging_setup import setup_logging
 from .notify import Notifier, TelegramNotifier
 from .risk import RiskManager
+from .snapshot import make_snapshot
 from .state import BotState
 from .strategy import build_strategy
 
@@ -84,7 +87,60 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
-    bot.run_forever()
+
+    server = None
+    if settings.bot.dashboard.enabled and not args.no_dashboard:
+        port = args.port if args.port is not None else settings.bot.dashboard.port
+        try:
+            server = DashboardServer(bot.get_snapshot, {"pause": bot.pause, "resume": bot.resume}, port=port)
+            server.start()
+            log.info("Dashboard: %s (nur von diesem Rechner erreichbar)", server.url)
+        except OSError as exc:
+            log.warning("Dashboard konnte nicht starten (%s). Der Bot laeuft ohne Dashboard weiter.", exc)
+    try:
+        bot.run_forever()
+    finally:
+        if server is not None:
+            server.stop()
+    return 0
+
+
+def cmd_dashboard(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    cfg = settings.bot
+    state_path = Path(cfg.state_dir) / f"state_{settings.mode}.json"
+    port = args.port if args.port is not None else cfg.dashboard.port
+
+    def snapshot() -> dict:
+        state = BotState.load(state_path)
+        return make_snapshot(
+            state=state,
+            mode=settings.mode,
+            exchange=cfg.exchange,
+            timeframe=cfg.timeframe,
+            quote=cfg.quote_currency,
+            symbols=cfg.symbols,
+            equity=None,
+            free_quote=None,
+            prices={},
+            last_cycle=state.equity_history[-1][0] if state.equity_history else None,
+            running=False,
+            controls=False,
+        )
+
+    try:
+        server = DashboardServer(snapshot, port=port)
+    except OSError as exc:
+        print(f"Port {port} ist nicht verfuegbar: {exc}\nLaeuft der Bot schon? Dann ist das Dashboard dort unter http://127.0.0.1:{port} erreichbar.", file=sys.stderr)
+        return 1
+    server.start()
+    print(f"Dashboard (nur Ansicht, Stand aus {state_path}): {server.url}\nBeenden mit Strg+C")
+    stop = threading.Event()
+    signal.signal(signal.SIGINT, lambda *_: stop.set())
+    signal.signal(signal.SIGTERM, lambda *_: stop.set())
+    while not stop.wait(1.0):
+        pass
+    server.stop()
     return 0
 
 
@@ -156,7 +212,13 @@ def main(argv: list[str] | None = None) -> int:
 
     p_run = sub.add_parser("run", help="Bot starten (Endlosschleife)")
     p_run.add_argument("--once", action="store_true", help="nur einen Zyklus ausfuehren")
+    p_run.add_argument("--no-dashboard", action="store_true", help="Dashboard nicht starten")
+    p_run.add_argument("--port", type=int, help="Dashboard-Port (Standard aus config.yaml)")
     p_run.set_defaults(func=cmd_run)
+
+    p_dash = sub.add_parser("dashboard", help="Dashboard nur als Ansicht starten (liest den gespeicherten Zustand)")
+    p_dash.add_argument("--port", type=int, help="Dashboard-Port (Standard aus config.yaml)")
+    p_dash.set_defaults(func=cmd_dashboard)
 
     p_bt = sub.add_parser("backtest", help="Strategie auf historischen Daten testen")
     p_bt.add_argument("--symbol")
