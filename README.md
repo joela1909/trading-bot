@@ -16,9 +16,11 @@ und begrenzt das Risiko pro Trade und pro Tag.
 - **Papierhandel** (Standard): Simulation mit echten Live-Kursen, Gebühren und Slippage, ohne API-Key.
 - **Live-Handel**: echte Market-Orders über ccxt (Binance, Kraken, Bybit, OKX, Coinbase, Bitget, ...).
   Muss doppelt freigeschaltet werden (`TRADING_MODE=live` und `LIVE_TRADING_CONFIRMED=true`).
-- **Strategie `ema_cross`**: Kauf beim Kreuzen der schnellen über die langsame EMA mit RSI-Filter,
-  Verkauf beim Gegenkreuz. Stop-Loss und Take-Profit werden über die ATR (Volatilität) bemessen,
-  der Stop zieht bei steigenden Kursen nach (Trailing-Stop).
+- **Fünf Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop:
+  `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
+  `rsi_reversion` und `bollinger_reversion` (Rückkehr zum Mittelwert). Gewählt wird in `config.yaml` unter `strategy.name`.
+- **Strategievergleich** (`tradingbot compare`): testet alle Strategien mit vielen Parametern auf mehreren Coins
+  und prüft die Gewinner auf einem Zeitraum, der bei der Auswahl nie benutzt wurde.
 - **Risikomanagement**: Positionsgröße nach festem Risiko pro Trade, maximale Positionsgröße,
   maximale Anzahl offener Positionen, Tagesverlustlimit, Mindestordergröße der Börse.
 - **Backtesting** auf historischen Daten (Download von der Börse oder CSV) mit Rendite,
@@ -115,6 +117,36 @@ tradingbot backtest --symbol BTC/USDT --csv daten/btc_1h.csv --export trades.csv
 Die Strategie-Parameter kommen aus `config.yaml`. Ein Backtest ersetzt keinen
 Papierhandel über mehrere Wochen: er kennt weder Orderbuch noch echte Latenz.
 
+## Beste Strategie finden
+
+```bash
+tradingbot compare --symbols BTC/USDT,ETH/USDT,SOL/USDT --since 2021-01-01
+```
+
+Der Befehl lädt die Kerzen (und merkt sie sich im Ordner `data/`), testet jede Strategie mit allen Parameter-
+Kombinationen und schreibt einen Bericht nach `reports/`. Dauer: je nach Datenmenge ein bis wenige Minuten.
+
+So wird Überanpassung vermieden:
+
+1. Die Daten werden geteilt, standardmäßig 60 % Auswahlzeitraum und 40 % Prüfzeitraum.
+2. Die besten Parameter jeder Strategie werden **nur** im Auswahlzeitraum bestimmt, über alle Coins gemeinsam.
+3. Bewertet und gerankt wird **nur** im Prüfzeitraum, den die Auswahl nie gesehen hat.
+4. Eine Strategie gilt nur als robust, wenn sie in beiden Zeiträumen Gewinn macht, im Prüfzeitraum mindestens
+   30 Trades und einen Profitfaktor ab 1,2 hat und bei mindestens 60 % der Coins im Plus liegt.
+   Andernfalls sagt der Bericht ausdrücklich, dass keine Strategie überzeugt.
+
+Ein automatischer Test (`tests/`) stellt sicher, dass Kerzen nach dem Split die Auswahl nicht beeinflussen können.
+Der Bericht zeigt zusätzlich Buy & Hold als Vergleich, die Ergebnisse je Coin und einen fertigen Eintrag für die
+`config.yaml`. Alle getesteten Varianten stehen als CSV daneben, damit du sehen kannst, wie stark Auswahl- und
+Prüfzeitraum auseinanderliegen.
+
+Optionen: `--timeframe 4h`, `--until 2025-01-01`, `--strategies donchian,macd_trend`, `--split 0.7`.
+Zum Ausprobieren ohne Börse: `tradingbot compare --demo trend` mit künstlichen Daten. Die Ergebnisse
+daraus sagen nichts über echte Märkte.
+
+Grenzen: Ein Backtest kennt keine Orderbuchtiefe, keine Latenz und keine Handelsausfälle. Ein einzelner
+Prüfzeitraum ist keine Garantie. Teste einen Gewinner anschließend mehrere Wochen im Papierhandel.
+
 ## Konfiguration
 
 Alle Parameter stehen kommentiert in [`config.yaml`](config.yaml). Die wichtigsten:
@@ -166,9 +198,9 @@ jeden Kauf und Verkauf sowie das Erreichen des Tagesverlustlimits.
 
 ## Eigene Strategie
 
-Neue Klasse in `src/tradingbot/strategy/` von `Strategy` ableiten, `warmup_bars`,
-`prepare(df)` (Indikatoren berechnen) und `decide(df, i)` (Signal für Kerze `i`) implementieren
-und in `strategy/__init__.py` registrieren. Backtester und Bot nutzen dieselbe Schnittstelle.
+Neue Klasse in `src/tradingbot/strategy/` von `Strategy` ableiten und `warmup_bars`, `_add_indicators(df)` und
+`signals(df)` (Kauf- und Verkaufs-Bool-Arrays) implementieren. Über `param_grid` legst du fest, welche Werte der
+Vergleich durchprobiert. Dann in `strategy/__init__.py` registrieren. Backtester, Vergleich und Bot nutzen dieselben Signale.
 
 ## Tests
 
@@ -182,7 +214,9 @@ pytest
 src/tradingbot/
 ├── cli.py            Kommandozeile: run, backtest, status
 ├── bot.py            Handelsschleife, Positionsverwaltung, Tagesverlustlimit
-├── backtest.py       Backtester mit Kennzahlen
+├── backtest.py       Backtester mit Kennzahlen, auch für Teilzeiträume
+├── research.py       Strategievergleich mit Auswahl- und Prüfzeitraum
+├── synthetic.py      Künstliche Kursreihen zum Testen des Werkzeugs
 ├── dashboard.py      Lokaler Webserver (nur Loopback) für das Dashboard
 ├── dashboard_page.py HTML, CSS und JavaScript des Dashboards
 ├── snapshot.py       Datenstand für das Dashboard (Kennzahlen, Positionen, Verlauf)
@@ -193,7 +227,7 @@ src/tradingbot/
 ├── risk.py           Positionsgröße, Limits
 ├── state.py          Persistenter Zustand
 ├── notify.py         Log- und Telegram-Benachrichtigungen
-└── strategy/         Strategie-Schnittstelle und ema_cross
+└── strategy/         Strategie-Schnittstelle und die fünf Strategien
 ```
 
 ## Lizenz

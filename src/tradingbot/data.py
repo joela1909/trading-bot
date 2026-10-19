@@ -124,3 +124,25 @@ def load_csv(path: str | Path) -> pd.DataFrame:
     if not pd.api.types.is_numeric_dtype(df["timestamp"]):
         df["timestamp"] = pd.to_datetime(df["timestamp"], utc=True).map(lambda t: int(t.timestamp() * 1000))
     return ohlcv_to_df(df[OHLCV_COLUMNS].values.tolist())
+
+
+def load_history(feed: "CcxtDataFeed", symbol: str, timeframe: str, since: str, until: str | None, cache_dir: str | Path) -> pd.DataFrame:
+    """Laedt historische Kerzen von der Boerse und legt sie als CSV im Zwischenspeicher ab."""
+    from datetime import datetime, timezone
+
+    until_label = until or datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    path = Path(cache_dir) / f"{symbol.replace('/', '_')}_{timeframe}_{since}_{until_label}.csv"
+    if path.exists():
+        log.info("%s: aus Zwischenspeicher %s", symbol, path)
+        return load_csv(path)
+
+    def to_ms(day: str) -> int:
+        return int(datetime.fromisoformat(day).replace(tzinfo=timezone.utc).timestamp() * 1000)
+
+    log.info("%s: lade %s ab %s von der Boerse ...", symbol, timeframe, since)
+    df = feed.fetch_ohlcv_range(symbol, timeframe, to_ms(since), to_ms(until) if until else None)
+    if df.empty:
+        raise RuntimeError(f"{symbol}: keine Kerzen erhalten")
+    path.parent.mkdir(parents=True, exist_ok=True)
+    df.to_csv(path, index=False)
+    return df

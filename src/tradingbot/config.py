@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["paper", "live"]
@@ -17,6 +17,8 @@ class PaperConfig(BaseModel):
 
 
 class StrategyConfig(BaseModel):
+    model_config = ConfigDict(extra="allow")
+
     name: str = "ema_cross"
     fast_ema: int = 20
     slow_ema: int = 50

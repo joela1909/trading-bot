@@ -12,14 +12,16 @@ from .backtest import Backtester
 from .bot import TradingBot
 from .config import Settings, load_settings
 from .dashboard import DashboardServer
-from .data import CcxtDataFeed, load_csv
+from .data import CcxtDataFeed, load_csv, load_history
 from .exchange import LiveBroker, PaperBroker
 from .logging_setup import setup_logging
 from .notify import Notifier, TelegramNotifier
 from .risk import RiskManager
 from .snapshot import make_snapshot
 from .state import BotState
-from .strategy import build_strategy
+from .research import format_report, grid_dataframe, run_comparison
+from .strategy import REGISTRY, build_strategy
+from .synthetic import make_series
 
 log = logging.getLogger(__name__)
 
@@ -184,6 +186,52 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def cmd_compare(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
+    cfg = settings.bot
+    timeframe = args.timeframe or cfg.timeframe
+    names = [n.strip() for n in args.strategies.split(",")] if args.strategies else list(REGISTRY)
+    unknown = [n for n in names if n not in REGISTRY]
+    if unknown:
+        print(f"Unbekannte Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
+        return 2
+
+    if args.demo:
+        data = {f"DEMO{i + 1}/USDT": make_series(args.demo, args.demo_bars, seed=100 + i) for i in range(3)}
+        print(f"\n*** DEMO-MODUS: synthetische '{args.demo}'-Daten, keine echten Kurse ***\n")
+    else:
+        if not args.since:
+            print("Bitte --since YYYY-MM-DD angeben (oder --demo trend|meanrev|random zum Ausprobieren).", file=sys.stderr)
+            return 2
+        symbols = [x.strip() for x in args.symbols.split(",")] if args.symbols else cfg.symbols
+        feed = CcxtDataFeed(cfg.exchange)
+        data = {s: load_history(feed, s, timeframe, args.since, args.until, args.cache_dir) for s in symbols}
+
+    comparison = run_comparison(
+        data,
+        names,
+        cfg.strategy,
+        cfg.risk,
+        cfg.paper,
+        timeframe,
+        split=args.split,
+        min_trades=args.min_trades,
+        progress=lambda msg: print(msg, flush=True),
+    )
+    report = format_report(comparison, synthetic=bool(args.demo))
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
+    report_path = out / f"vergleich_{stamp}.md"
+    grid_path = out / f"vergleich_{stamp}_alle_varianten.csv"
+    report_path.write_text(report, encoding="utf-8")
+    grid_dataframe(comparison).to_csv(grid_path, index=False)
+    print("\n" + report)
+    print(f"Bericht: {report_path}\nAlle Varianten: {grid_path}")
+    return 0
+
+
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     cfg = settings.bot
@@ -229,6 +277,20 @@ def main(argv: list[str] | None = None) -> int:
     p_bt.add_argument("--trades", action="store_true", help="alle Trades auflisten")
     p_bt.add_argument("--export", help="Trades als CSV speichern")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_cmp = sub.add_parser("compare", help="Alle Strategien mit vielen Parametern vergleichen und die robusteste finden")
+    p_cmp.add_argument("--symbols", help="Komma-getrennt, z. B. BTC/USDT,ETH/USDT,SOL/USDT (Standard: aus config.yaml)")
+    p_cmp.add_argument("--timeframe", help="Zeitrahmen, z. B. 1h oder 4h (Standard: aus config.yaml)")
+    p_cmp.add_argument("--since", help="Startdatum YYYY-MM-DD, empfohlen sind mindestens 3 Jahre")
+    p_cmp.add_argument("--until", help="Enddatum YYYY-MM-DD (Standard: heute)")
+    p_cmp.add_argument("--strategies", help="Komma-getrennte Auswahl (Standard: alle)")
+    p_cmp.add_argument("--split", type=float, default=0.6, help="Anteil der Daten fuer die Parameterwahl, Rest ist Pruefzeitraum")
+    p_cmp.add_argument("--min-trades", type=int, default=10, help="Mindestzahl Trades im Auswahlzeitraum")
+    p_cmp.add_argument("--cache-dir", default="data", help="Zwischenspeicher fuer heruntergeladene Kerzen")
+    p_cmp.add_argument("--out", default="reports", help="Ordner fuer den Bericht")
+    p_cmp.add_argument("--demo", choices=["trend", "meanrev", "random"], help="Mit synthetischen Daten ausprobieren")
+    p_cmp.add_argument("--demo-bars", type=int, default=20000, help=argparse.SUPPRESS)
+    p_cmp.set_defaults(func=cmd_compare)
 
     p_st = sub.add_parser("status", help="Positionen und Trades anzeigen")
     p_st.add_argument("--last", type=int, default=20, help="Anzahl der letzten Trades")

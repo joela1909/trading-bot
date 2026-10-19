@@ -27,3 +27,12 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
         [high - low, (high - prev_close).abs(), (low - prev_close).abs()], axis=1
     ).max(axis=1)
     return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
+
+
+def sma(series: pd.Series, period: int) -> pd.Series:
+    return series.rolling(period, min_periods=period).mean()
+
+
+def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
+    line = ema(series, fast) - ema(series, slow)
+    return line, ema(line, signal)
