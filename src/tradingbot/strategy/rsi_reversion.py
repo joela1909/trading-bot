@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..indicators import ema, rsi
-from .base import Strategy
+from .base import Strategy, WARMUP_FACTOR
 
 
 class RsiReversionStrategy(Strategy):
@@ -17,7 +17,7 @@ class RsiReversionStrategy(Strategy):
 
     @property
     def warmup_bars(self) -> int:
-        return 3 * max(self.cfg.rsi_period, self.p("trend_ema", 0), self.cfg.atr_period)
+        return WARMUP_FACTOR * max(self.cfg.rsi_period, self.p("trend_ema", 0), self.cfg.atr_period)
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         df["rsi"] = rsi(df["close"], self.cfg.rsi_period)

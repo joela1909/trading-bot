@@ -50,6 +50,20 @@ class NotificationConfig(BaseModel):
     telegram_enabled: bool = False
 
 
+class ProtectionConfig(BaseModel):
+    cooldown_candles: int = Field(default=2, ge=0)
+    stoploss_guard_stops: int = Field(default=3, ge=0)
+    stoploss_guard_window_candles: int = Field(default=24, ge=1)
+    stoploss_guard_lock_candles: int = Field(default=12, ge=1)
+    max_drawdown_pct: float = Field(default=20.0, ge=0)
+    max_drawdown_lock_candles: int = Field(default=48, ge=1)
+
+
+class ExecutionConfig(BaseModel):
+    stoploss_on_exchange: bool = False
+    stoploss_replace_threshold_pct: float = Field(default=0.25, ge=0)
+
+
 class DashboardConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=8765, ge=0, le=65535)
@@ -69,6 +83,8 @@ class BotConfig(BaseModel):
     risk: RiskConfig = Field(default_factory=RiskConfig)
     notifications: NotificationConfig = Field(default_factory=NotificationConfig)
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
+    protections: ProtectionConfig = Field(default_factory=ProtectionConfig)
+    execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
 
     @field_validator("symbols")
     @classmethod

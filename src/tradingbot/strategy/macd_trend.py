@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..indicators import ema, macd
-from .base import Strategy, cross_down, cross_up
+from .base import Strategy, WARMUP_FACTOR, cross_down, cross_up
 
 
 class MacdTrendStrategy(Strategy):
@@ -21,7 +21,7 @@ class MacdTrendStrategy(Strategy):
 
     @property
     def warmup_bars(self) -> int:
-        return 3 * max(self.p("macd_slow", 26) + self.p("macd_signal", 9), self.p("trend_ema", 0), self.cfg.atr_period)
+        return WARMUP_FACTOR * max(self.p("macd_slow", 26) + self.p("macd_signal", 9), self.p("trend_ema", 0), self.cfg.atr_period)
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         line, signal = macd(df["close"], self.p("macd_fast", 12), self.p("macd_slow", 26), self.p("macd_signal", 9))

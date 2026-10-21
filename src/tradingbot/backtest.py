@@ -6,8 +6,9 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from .config import PaperConfig, StrategyConfig
+from .config import PaperConfig, ProtectionConfig, StrategyConfig
 from .models import MarketLimits, Position, Trade
+from .protections import Protections
 from .risk import RiskManager
 from .strategy import Strategy
 
@@ -54,7 +55,16 @@ class BacktestResult:
 
 
 class Backtester:
-    def __init__(self, strategy: Strategy, risk: RiskManager, strategy_cfg: StrategyConfig, paper_cfg: PaperConfig, limits: MarketLimits | None = None):
+    def __init__(
+        self,
+        strategy: Strategy,
+        risk: RiskManager,
+        strategy_cfg: StrategyConfig,
+        paper_cfg: PaperConfig,
+        limits: MarketLimits | None = None,
+        protections_cfg: ProtectionConfig | None = None,
+    ):
+        self.protections_cfg = protections_cfg
         self.strategy = strategy
         self.risk = risk
         self.scfg = strategy_cfg
@@ -98,6 +108,9 @@ class Backtester:
         tp_mult = self.scfg.take_profit_atr_mult
         trailing = self.scfg.trailing_stop
 
+        tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
+        prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
+
         cash = self.start_balance
         pos: Position | None = None
         trades: list[Trade] = []
@@ -113,6 +126,8 @@ class Backtester:
             total_fees += fee
             pnl = (price - p.entry_price) * p.amount - fees
             trades.append(Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason))
+            if prot is not None:
+                prot.on_exit(symbol, reason, ms)
 
         for k in range(end - start):
             i = start + k
@@ -134,7 +149,7 @@ class Backtester:
                     pos.highest_price = high[i]
                     if a == a and a > 0:
                         pos.stop_loss = max(pos.stop_loss, self.strategy.trailing_stop(pos.highest_price, a))
-            elif buy[i] and a == a and a > 0:
+            elif buy[i] and a == a and a > 0 and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0]):
                 entry = c * (1 + slip)
                 stop = entry - stop_mult * a
                 amount = self.risk.position_size(cash, cash, entry, stop, self.limits)
@@ -146,6 +161,8 @@ class Backtester:
                     tp = entry + tp_mult * a if tp_mult > 0 else None
                     pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a)
             equity[k] = cash + (pos.amount * c if pos is not None else 0.0)
+            if prot is not None:
+                prot.update_equity(equity[k], int(ts[i]))
 
         if pos is not None:
             close_position(pos, close[end - 1] * (1 - slip), int(ts[end - 1]), "end_of_data")

@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..indicators import ema, sma
-from .base import Strategy
+from .base import Strategy, WARMUP_FACTOR
 
 
 class BollingerReversionStrategy(Strategy):
@@ -17,7 +17,7 @@ class BollingerReversionStrategy(Strategy):
 
     @property
     def warmup_bars(self) -> int:
-        return 3 * max(self.p("bb_period", 20), self.p("trend_ema", 0), self.cfg.atr_period)
+        return WARMUP_FACTOR * max(self.p("bb_period", 20), self.p("trend_ema", 0), self.cfg.atr_period)
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         period = self.p("bb_period", 20)

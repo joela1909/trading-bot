@@ -17,6 +17,7 @@ class BotState:
     entries_halted_for_day: bool = False
     entries_paused: bool = False
     equity_history: list[list] = field(default_factory=list)
+    protections: dict = field(default_factory=dict)
 
     def to_dict(self) -> dict:
         return {
@@ -28,6 +29,7 @@ class BotState:
             "entries_halted_for_day": self.entries_halted_for_day,
             "entries_paused": self.entries_paused,
             "equity_history": self.equity_history,
+            "protections": self.protections,
         }
 
     @classmethod
@@ -41,6 +43,7 @@ class BotState:
             entries_halted_for_day=bool(d.get("entries_halted_for_day", False)),
             entries_paused=bool(d.get("entries_paused", False)),
             equity_history=[list(x) for x in d.get("equity_history", [])],
+            protections=dict(d.get("protections", {})),
         )
 
     def save(self, path: str | Path) -> None:

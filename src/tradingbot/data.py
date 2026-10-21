@@ -66,7 +66,12 @@ class CcxtDataFeed:
             self.exchange.load_markets()
             self._markets_loaded = True
 
+    MAX_PER_REQUEST = 1000
+
     def fetch_ohlcv(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+        if limit > self.MAX_PER_REQUEST:
+            since_ms = int(time.time() * 1000) - (limit + 2) * timeframe_seconds(timeframe) * 1000
+            return self.fetch_ohlcv_range(symbol, timeframe, since_ms).tail(limit).reset_index(drop=True)
         rows = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=limit)
         df = ohlcv_to_df(rows)
         return drop_incomplete_candle(df, timeframe)

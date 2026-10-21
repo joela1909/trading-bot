@@ -8,10 +8,11 @@ from datetime import datetime, timezone
 from pathlib import Path
 
 from .config import Settings
-from .data import DataFeed
+from .data import DataFeed, timeframe_seconds
 from .exchange import Broker
 from .models import Position, Signal, Trade, utcnow_iso
 from .notify import Notifier
+from .protections import Protections
 from .risk import RiskManager
 from .snapshot import make_snapshot
 from .state import BotState
@@ -42,6 +43,8 @@ class TradingBot:
         self.notifier = notifier
         self.state_path = Path(state_path)
         self._stop = False
+        self.protections = Protections(self.cfg.protections, timeframe_seconds(self.cfg.timeframe) * 1000)
+        self.protections.load(state.protections)
         self._save_lock = threading.Lock()
         self.last_prices: dict[str, float] = {}
         self.last_equity: float | None = None
@@ -60,6 +63,7 @@ class TradingBot:
 
     def _save(self) -> None:
         with self._save_lock:
+            self.state.protections = self.protections.to_dict()
             self.state.save(self.state_path)
 
     EQUITY_POINT_SECONDS = 300
@@ -158,6 +162,8 @@ class TradingBot:
                 log.exception("Fehler bei %s", symbol)
 
         final_equity = self.equity(prices) if prices else equity
+        if prices:
+            self.protections.update_equity(final_equity, int(time.time() * 1000))
         self.last_prices = dict(prices)
         self.last_equity = final_equity
         try:
@@ -221,6 +227,10 @@ class TradingBot:
         if self.state.entries_halted_for_day:
             log.info("%s: Kaufsignal ignoriert, Tagesverlustlimit erreicht", symbol)
             return
+        allowed, why = self.protections.entry_allowed(symbol, int(time.time() * 1000))
+        if not allowed:
+            log.info("%s: Kaufsignal ignoriert, %s", symbol, why)
+            return
         if not self.risk.can_open_new(len(self.state.positions)):
             log.info("%s: Kaufsignal ignoriert, max. offene Positionen erreicht", symbol)
             return
@@ -278,6 +288,7 @@ class TradingBot:
             reason=reason,
         )
         self.state.trades.append(trade)
+        self.protections.on_exit(symbol, reason, int(time.time() * 1000))
         del self.state.positions[symbol]
         self._save()
         self.notifier.send(

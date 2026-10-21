@@ -3,7 +3,7 @@ from __future__ import annotations
 import pandas as pd
 
 from ..indicators import ema, rsi
-from .base import Strategy, cross_down, cross_up
+from .base import Strategy, WARMUP_FACTOR, cross_down, cross_up
 
 
 class EmaCrossStrategy(Strategy):
@@ -21,7 +21,7 @@ class EmaCrossStrategy(Strategy):
 
     @property
     def warmup_bars(self) -> int:
-        return 3 * max(self.cfg.slow_ema, self.cfg.rsi_period, self.cfg.atr_period)
+        return WARMUP_FACTOR * max(self.cfg.slow_ema, self.cfg.rsi_period, self.cfg.atr_period)
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         df["ema_fast"] = ema(df["close"], self.cfg.fast_ema)

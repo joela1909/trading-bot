@@ -10,6 +10,10 @@ from ..config import StrategyConfig
 from ..indicators import atr
 from ..models import Decision, Signal
 
+# Geglaettete Indikatoren (EMA, RSI, ATR) schwingen erst nach vielen Kerzen auf ihren Endwert ein. Mit diesem
+# Faktor kommen Live-Bot (wenige Kerzen) und Backtest (ganze Historie) auf praktisch dieselben Signale.
+WARMUP_FACTOR = 8
+
 EXIT_GRID: dict[str, list] = {
     "stop_atr_mult": [2.0, 3.0],
     "take_profit_atr_mult": [0.0, 4.0],

@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import pandas as pd
 
-from .base import Strategy
+from .base import Strategy, WARMUP_FACTOR
 
 
 class DonchianStrategy(Strategy):
@@ -16,7 +16,7 @@ class DonchianStrategy(Strategy):
 
     @property
     def warmup_bars(self) -> int:
-        return 3 * max(self.p("donchian_entry", 40), self.p("donchian_exit", 20), self.cfg.atr_period)
+        return WARMUP_FACTOR * max(self.p("donchian_entry", 40), self.p("donchian_exit", 20), self.cfg.atr_period)
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         df["don_high"] = df["high"].rolling(self.p("donchian_entry", 40)).max().shift(1)

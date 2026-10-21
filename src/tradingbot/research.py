@@ -9,7 +9,7 @@ from typing import Callable
 import pandas as pd
 
 from .backtest import Backtester, BacktestResult
-from .config import PaperConfig, RiskConfig, StrategyConfig
+from .config import PaperConfig, ProtectionConfig, RiskConfig, StrategyConfig
 from .risk import RiskManager
 from .strategy import EXIT_GRID, REGISTRY
 
@@ -143,6 +143,7 @@ def run_comparison(
     split: float = 0.6,
     min_trades: int = 10,
     progress: Callable[[str], None] | None = None,
+    protections: ProtectionConfig | None = None,
 ) -> Comparison:
     if not 0.2 <= split <= 0.9:
         raise ValueError("split muss zwischen 0.2 und 0.9 liegen")
@@ -175,7 +176,7 @@ def run_comparison(
             for params in variants:
                 cfg = base_cfg.model_copy(update={"name": name, **params})
                 strategy = REGISTRY[name](cfg)
-                bt = Backtester(strategy, risk, cfg, paper_cfg)
+                bt = Backtester(strategy, risk, cfg, paper_cfg, protections_cfg=protections)
                 is_res, oos_res = [], []
                 for s in symbols:
                     p, sig = prepared[s]
@@ -222,7 +223,7 @@ def _params_text(params: dict) -> str:
     return ", ".join(f"{k}={v}" for k, v in params.items())
 
 
-def format_report(cmp: Comparison, synthetic: bool = False) -> str:
+def format_report(cmp: Comparison, synthetic: bool = False, notes: list[str] | None = None) -> str:
     lines: list[str] = []
     if synthetic:
         lines += ["> **ACHTUNG: SYNTHETISCHE DATEN.** Diese Zahlen stammen aus kuenstlich erzeugten Kursreihen und sagen nichts ueber echte Maerkte.", ""]
@@ -257,6 +258,8 @@ def format_report(cmp: Comparison, synthetic: bool = False) -> str:
     bh = [f"{r.buy_hold_return_pct:+.1f}%" for r in ranking_first(cmp).best.oos_results]
     lines.append("| Buy & Hold | " + " | ".join(bh) + " |")
 
+    if notes:
+        lines += ["", "## Pruefung der Strategien", ""] + [f"- {n}" for n in notes]
     lines += ["", "## Bewertung", ""]
     winner = cmp.winner
     if winner is None:

@@ -9,6 +9,7 @@ import webbrowser
 from datetime import datetime, timezone
 from pathlib import Path
 
+from .analysis import check_lookahead, check_recursive
 from .backtest import Backtester
 from .bot import TradingBot
 from .config import Settings, load_settings
@@ -174,7 +175,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             limits = None
     log.info("%d Kerzen geladen", len(df))
 
-    bt = Backtester(build_strategy(cfg.strategy), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits)
+    bt = Backtester(build_strategy(cfg.strategy), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits, protections_cfg=cfg.protections)
     result = bt.run(df, symbol)
     print(result.summary())
     if args.trades:
@@ -189,6 +190,48 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     return 0
 
 
+def _load_market_data(args: argparse.Namespace, cfg, timeframe: str):
+    """Gemeinsame Datenbeschaffung fuer compare und check. Gibt None bei Fehlern zurueck."""
+    if args.demo:
+        data = {f"DEMO{i + 1}/USDT": make_series(args.demo, args.demo_bars, seed=100 + i) for i in range(3)}
+        print(f"\n*** DEMO-MODUS: synthetische '{args.demo}'-Daten, keine echten Kurse ***\n")
+        return data
+    if not args.since:
+        print("Bitte --since YYYY-MM-DD angeben (oder --demo trend|meanrev|random zum Ausprobieren).", file=sys.stderr)
+        return None
+    symbols = [x.strip() for x in args.symbols.split(",")] if args.symbols else cfg.symbols
+    feed = CcxtDataFeed(cfg.exchange)
+    return {s: load_history(feed, s, timeframe, args.since, args.until, args.cache_dir) for s in symbols}
+
+
+def cmd_check(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
+    cfg = settings.bot
+    timeframe = args.timeframe or cfg.timeframe
+    names = [n.strip() for n in args.strategies.split(",")] if args.strategies else list(REGISTRY)
+    unknown = [n for n in names if n not in REGISTRY]
+    if unknown:
+        print(f"Unbekannte Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
+        return 2
+    data = _load_market_data(args, cfg, timeframe)
+    if data is None:
+        return 2
+    symbol = next(iter(data))
+    print(f"Pruefung auf {symbol}, {len(data[symbol])} Kerzen\n")
+    print(f"{'Strategie':24s} {'Blick in die Zukunft':22s} {'Live-Kerzen vs. Historie'}")
+    failed = False
+    for name in names:
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}))
+        look = check_lookahead(strat, data[symbol])
+        rec = check_recursive(strat, data[symbol])
+        look_text = f"ok ({look.checked} Stellen)" if look.ok else f"FEHLER bei {len(look.mismatches)} Stellen"
+        rec_text = f"ok ({rec.mismatch_pct:.1f}% Abweichung)" if rec.ok else f"WARNUNG ({rec.mismatch_pct:.1f}% Abweichung)"
+        print(f"{name:24s} {look_text:22s} {rec_text}")
+        failed |= not look.ok
+    return 1 if failed else 0
+
+
 def cmd_compare(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
@@ -200,16 +243,29 @@ def cmd_compare(args: argparse.Namespace) -> int:
         print(f"Unbekannte Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
         return 2
 
-    if args.demo:
-        data = {f"DEMO{i + 1}/USDT": make_series(args.demo, args.demo_bars, seed=100 + i) for i in range(3)}
-        print(f"\n*** DEMO-MODUS: synthetische '{args.demo}'-Daten, keine echten Kurse ***\n")
-    else:
-        if not args.since:
-            print("Bitte --since YYYY-MM-DD angeben (oder --demo trend|meanrev|random zum Ausprobieren).", file=sys.stderr)
-            return 2
-        symbols = [x.strip() for x in args.symbols.split(",")] if args.symbols else cfg.symbols
-        feed = CcxtDataFeed(cfg.exchange)
-        data = {s: load_history(feed, s, timeframe, args.since, args.until, args.cache_dir) for s in symbols}
+    data = _load_market_data(args, cfg, timeframe)
+    if data is None:
+        return 2
+
+    notes: list[str] = []
+    usable: list[str] = []
+    first_symbol = next(iter(data))
+    for name in names:
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}))
+        look = check_lookahead(strat, data[first_symbol])
+        rec = check_recursive(strat, data[first_symbol])
+        if not look.ok:
+            print(f"! {name}: Blick in die Zukunft erkannt, Strategie wird nicht getestet.")
+            notes.append(f"{name}: **ausgeschlossen**, die Signale aendern sich, wenn spaetere Kerzen hinzukommen (Blick in die Zukunft).")
+            continue
+        usable.append(name)
+        if not rec.ok:
+            print(f"! {name}: Live-Bot kaeme bei {rec.mismatch_pct:.1f}% der Pruefstellen zu anderen Signalen als der Backtest.")
+            notes.append(f"{name}: Warnung, mit nur den Live-Kerzen weichen {rec.mismatch_pct:.1f}% der Signale vom Backtest ab.")
+    if not usable:
+        print("Keine Strategie hat die Pruefung bestanden.", file=sys.stderr)
+        return 1
+    names = usable
 
     comparison = run_comparison(
         data,
@@ -221,8 +277,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
         split=args.split,
         min_trades=args.min_trades,
         progress=lambda msg: print(msg, flush=True),
+        protections=None if args.no_protections else cfg.protections,
     )
-    report = format_report(comparison, synthetic=bool(args.demo))
+    report = format_report(comparison, synthetic=bool(args.demo), notes=notes)
     out = Path(args.out)
     out.mkdir(parents=True, exist_ok=True)
     stamp = datetime.now(timezone.utc).strftime("%Y%m%d-%H%M%S")
@@ -282,6 +339,17 @@ def main(argv: list[str] | None = None) -> int:
     p_bt.add_argument("--export", help="Trades als CSV speichern")
     p_bt.set_defaults(func=cmd_backtest)
 
+    p_chk = sub.add_parser("check", help="Strategien auf Blick in die Zukunft und Abweichung zwischen Backtest und Live pruefen")
+    p_chk.add_argument("--symbols", help="Das erste Paar wird geprueft (Standard: aus config.yaml)")
+    p_chk.add_argument("--timeframe")
+    p_chk.add_argument("--since", help="Startdatum YYYY-MM-DD")
+    p_chk.add_argument("--until")
+    p_chk.add_argument("--strategies", help="Komma-getrennte Auswahl (Standard: alle)")
+    p_chk.add_argument("--cache-dir", default="data")
+    p_chk.add_argument("--demo", choices=["trend", "meanrev", "random"])
+    p_chk.add_argument("--demo-bars", type=int, default=6000, help=argparse.SUPPRESS)
+    p_chk.set_defaults(func=cmd_check)
+
     p_cmp = sub.add_parser("compare", help="Alle Strategien mit vielen Parametern vergleichen und die robusteste finden")
     p_cmp.add_argument("--symbols", help="Komma-getrennt, z. B. BTC/USDT,ETH/USDT,SOL/USDT (Standard: aus config.yaml)")
     p_cmp.add_argument("--timeframe", help="Zeitrahmen, z. B. 1h oder 4h (Standard: aus config.yaml)")
@@ -293,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("--cache-dir", default="data", help="Zwischenspeicher fuer heruntergeladene Kerzen")
     p_cmp.add_argument("--out", default="reports", help="Ordner fuer den Bericht")
     p_cmp.add_argument("--demo", choices=["trend", "meanrev", "random"], help="Mit synthetischen Daten ausprobieren")
+    p_cmp.add_argument("--no-protections", action="store_true", help="Schutzmechanismen im Test abschalten")
     p_cmp.add_argument("--demo-bars", type=int, default=20000, help=argparse.SUPPRESS)
     p_cmp.set_defaults(func=cmd_compare)
 
