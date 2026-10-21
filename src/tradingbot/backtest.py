@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from .config import PaperConfig, ProtectionConfig, StrategyConfig
+from .config import DaytradingConfig, PaperConfig, ProtectionConfig, StrategyConfig
 from .models import MarketLimits, Position, Trade
 from .protections import Protections
 from .risk import RiskManager
+from .session import Session
 from .strategy import Strategy
 
 
@@ -63,8 +64,10 @@ class Backtester:
         paper_cfg: PaperConfig,
         limits: MarketLimits | None = None,
         protections_cfg: ProtectionConfig | None = None,
+        daytrading: DaytradingConfig | None = None,
     ):
         self.protections_cfg = protections_cfg
+        self.daytrading = daytrading if daytrading is not None and daytrading.enabled else None
         self.strategy = strategy
         self.risk = risk
         self.scfg = strategy_cfg
@@ -111,6 +114,22 @@ class Backtester:
         tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
         prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
 
+        # Tageshandel: Einstiegsfenster, Schliessen zur flat_time, max. Einstiege und Tagesverlustlimit
+        dt = self.daytrading
+        if dt is not None:
+            minute, day = Session(dt).bar_times(ts, tf_ms)
+            minute, day = minute.tolist(), day.tolist()
+            flat_min, entry_lo, entry_hi = dt.flat_min, dt.entry_start_min, dt.entry_end_min
+            max_entries = dt.max_trades_per_day
+            max_hold_ms = dt.max_hold_minutes * 60_000
+            max_daily_loss = self.risk.cfg.max_daily_loss_pct / 100.0
+        cur_day = None
+        day_start_eq = 0.0
+        entries_today = 0
+        halted = False
+        pos_day = None
+        pos_ts = 0
+
         cash = self.start_balance
         pos: Position | None = None
         trades: list[Trade] = []
@@ -133,6 +152,11 @@ class Backtester:
             i = start + k
             c = close[i]
             a = atr_v[i]
+            if dt is not None and day[i] != cur_day:
+                cur_day = day[i]
+                day_start_eq = cash + (pos.amount * close[i - 1] if pos is not None else 0.0)
+                entries_today = 0
+                halted = False
             if pos is not None:
                 exit_price = None
                 reason = ""
@@ -140,16 +164,36 @@ class Backtester:
                     exit_price, reason = pos.stop_loss * (1 - slip), "stop_loss"
                 elif pos.take_profit is not None and high[i] >= pos.take_profit:
                     exit_price, reason = pos.take_profit * (1 - slip), "take_profit"
+                elif dt is not None and (day[i] != pos_day or minute[i] >= flat_min):
+                    exit_price, reason = c * (1 - slip), "session_end"
+                elif dt is not None and max_hold_ms and int(ts[i]) - pos_ts >= max_hold_ms:
+                    exit_price, reason = c * (1 - slip), "max_hold"
                 elif sell[i]:
                     exit_price, reason = c * (1 - slip), "signal"
                 if exit_price is not None:
                     close_position(pos, exit_price, int(ts[i]), reason)
                     pos = None
+                    if dt is not None and day_start_eq > 0 and (day_start_eq - cash) / day_start_eq >= max_daily_loss:
+                        halted = True
                 elif trailing and high[i] > pos.highest_price:
                     pos.highest_price = high[i]
                     if a == a and a > 0:
                         pos.stop_loss = max(pos.stop_loss, self.strategy.trailing_stop(pos.highest_price, a))
-            elif buy[i] and a == a and a > 0 and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0]):
+            elif (
+                buy[i]
+                and a == a
+                and a > 0
+                and (
+                    dt is None
+                    or (
+                        entry_lo <= minute[i] < entry_hi
+                        and minute[i] < flat_min
+                        and not halted
+                        and (not max_entries or entries_today < max_entries)
+                    )
+                )
+                and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0])
+            ):
                 entry = c * (1 + slip)
                 stop = entry - stop_mult * a
                 amount = self.risk.position_size(cash, cash, entry, stop, self.limits)
@@ -160,6 +204,9 @@ class Backtester:
                     total_fees += fee
                     tp = entry + tp_mult * a if tp_mult > 0 else None
                     pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a)
+                    entries_today += 1
+                    pos_day = day[i] if dt is not None else None
+                    pos_ts = int(ts[i])
             equity[k] = cash + (pos.amount * c if pos is not None else 0.0)
             if prot is not None:
                 prot.update_equity(equity[k], int(ts[i]))

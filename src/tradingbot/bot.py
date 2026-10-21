@@ -14,6 +14,7 @@ from .models import Fill, Position, Signal, Trade, utcnow_iso
 from .notify import Notifier
 from .protections import Protections
 from .risk import RiskManager
+from .session import Session, parse_iso
 from .snapshot import make_snapshot
 from .state import BotState
 from .strategy import Strategy
@@ -53,6 +54,7 @@ class TradingBot:
         self.last_cycle: str | None = None
         self.running = False
         self._snapshot: dict | None = None
+        self.session: Session | None = Session(self.cfg.daytrading) if self.cfg.daytrading.enabled else None
 
     # ----------------------------------------------------------------- helpers
     def equity(self, prices: dict[str, float] | None = None) -> float:
@@ -149,12 +151,18 @@ class TradingBot:
         log.warning("Neue Einstiege wieder aktiv (Dashboard)")
         return self.build_snapshot()
 
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
     def _roll_day(self, equity: float) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now = self._now()
+        today = self.session.day(now) if self.session else now.strftime("%Y-%m-%d")
         if self.state.day != today:
             self.state.day = today
             self.state.day_start_equity = equity
             self.state.entries_halted_for_day = False
+            self.state.entries_today = 0
             log.info("Neuer Handelstag %s, Startkapital %.2f %s", today, equity, self.cfg.quote_currency)
 
     def reconcile(self) -> None:
@@ -283,6 +291,12 @@ class TradingBot:
     def _manage_position(self, symbol: str, pos: Position, price: float, df, is_new_candle: bool) -> None:
         if self._sync_exchange_stop(symbol, pos):
             return
+        if self.session is not None:
+            reason = self.session.must_close(self._now(), parse_iso(pos.opened_at))
+            if reason:
+                log.info("%s: Tageshandel, Position wird geschlossen (%s)", symbol, reason)
+                self._close_position(symbol, pos, reason)
+                return
         if price > pos.highest_price:
             pos.highest_price = price
             if self.cfg.strategy.trailing_stop:
@@ -313,6 +327,14 @@ class TradingBot:
         if self.state.entries_halted_for_day:
             log.info("%s: Tagesverlustlimit erreicht, kein Einstieg", symbol)
             return
+        if self.session is not None:
+            dt = self.cfg.daytrading
+            if not self.session.entry_allowed(self._now()):
+                log.info("%s: kein Einstieg, ausserhalb der Einstiegszeit %s-%s", symbol, dt.entry_start, dt.entry_end)
+                return
+            if dt.max_trades_per_day and self.state.entries_today >= dt.max_trades_per_day:
+                log.info("%s: kein Einstieg, max. %d Einstiege pro Tag erreicht", symbol, dt.max_trades_per_day)
+                return
         allowed, why = self.protections.entry_allowed(symbol, int(time.time() * 1000))
         if not allowed:
             log.info("%s: kein Einstieg, %s", symbol, why)
@@ -351,6 +373,7 @@ class TradingBot:
             atr_at_entry=decision.atr,
         )
         self.state.positions[symbol] = pos
+        self.state.entries_today += 1
         self._arm_exchange_stop(symbol, pos)
         self._save()
         tp_text = f"{take_profit:.4f}" if take_profit is not None else "aus"
@@ -417,6 +440,12 @@ class TradingBot:
         self.build_snapshot()
         self.notifier.send(
             f"Bot gestartet ({self.broker.name}-Modus, {self.cfg.exchange}, {', '.join(self.cfg.symbols)}, {self.cfg.timeframe})"
+            + (
+                f", Tageshandel {self.cfg.daytrading.entry_start}-{self.cfg.daytrading.entry_end}, "
+                f"flat ab {self.cfg.daytrading.flat_time} {self.cfg.daytrading.timezone}"
+                if self.session
+                else ""
+            )
         )
         interval = max(5, self.cfg.poll_interval_seconds)
         while not self._stop:

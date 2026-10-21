@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["paper", "live"]
@@ -45,6 +45,61 @@ class RiskConfig(BaseModel):
     max_open_positions: int = 3
     max_daily_loss_pct: float = 3.0
     min_order_quote: float = 10.0
+
+
+def _parse_hhmm(value: str) -> int:
+    try:
+        hh, mm = value.split(":")
+        minutes = int(hh) * 60 + int(mm)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"Uhrzeit '{value}' muss im Format HH:MM sein") from exc
+    if not 0 <= minutes <= 24 * 60:
+        raise ValueError(f"Uhrzeit '{value}' ausserhalb von 00:00 bis 24:00")
+    return minutes
+
+
+class DaytradingConfig(BaseModel):
+    """Regeln fuer den Tageshandel. Alle Uhrzeiten gelten in `timezone`.
+
+    Neue Einstiege nur zwischen entry_start und entry_end, ab flat_time werden alle Positionen geschlossen.
+    Keine Position wird ueber Nacht gehalten."""
+
+    enabled: bool = False
+    timezone: str = "Europe/Berlin"
+    entry_start: str = "08:00"
+    entry_end: str = "21:30"
+    flat_time: str = "22:00"
+    max_trades_per_day: int = Field(default=6, ge=0)  # 0 = unbegrenzt
+    max_hold_minutes: int = Field(default=0, ge=0)  # 0 = nur durch flat_time begrenzt
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz_exists(cls, v: str):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unbekannte Zeitzone '{v}'") from exc
+        return v
+
+    @model_validator(mode="after")
+    def _times_ordered(self):
+        if not self.entry_start_min < self.entry_end_min <= self.flat_min:
+            raise ValueError("Es muss gelten: entry_start < entry_end <= flat_time (ohne Mitternacht dazwischen)")
+        return self
+
+    @property
+    def entry_start_min(self) -> int:
+        return _parse_hhmm(self.entry_start)
+
+    @property
+    def entry_end_min(self) -> int:
+        return _parse_hhmm(self.entry_end)
+
+    @property
+    def flat_min(self) -> int:
+        return _parse_hhmm(self.flat_time)
 
 
 class NotificationConfig(BaseModel):
@@ -98,6 +153,12 @@ class BotConfig(BaseModel):
     protections: ProtectionConfig = Field(default_factory=ProtectionConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     ai: AiConfig = Field(default_factory=AiConfig)
+    daytrading: DaytradingConfig = Field(default_factory=DaytradingConfig)
+
+    @property
+    def session_cfg(self) -> DaytradingConfig | None:
+        """Tageshandel-Regeln, falls eingeschaltet, sonst None."""
+        return self.daytrading if self.daytrading.enabled else None
 
     @field_validator("symbols")
     @classmethod

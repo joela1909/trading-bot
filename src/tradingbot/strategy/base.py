@@ -6,7 +6,7 @@ from typing import Any
 import numpy as np
 import pandas as pd
 
-from ..config import StrategyConfig
+from ..config import DaytradingConfig, StrategyConfig
 from ..indicators import atr
 from ..models import Decision, Signal
 
@@ -32,8 +32,10 @@ class Strategy(ABC):
     sell_reason: str = "Verkaufssignal"
     param_grid: dict[str, list] = {}
 
-    def __init__(self, cfg: StrategyConfig):
+    def __init__(self, cfg: StrategyConfig, session: DaytradingConfig | None = None):
         self.cfg = cfg
+        # Intraday-Strategien brauchen Zeitzone und Handelsbeginn. Ohne Tageshandel: UTC, Tag ab 00:00.
+        self.session = session or DaytradingConfig(timezone="UTC", entry_start="00:00", entry_end="23:59", flat_time="24:00")
 
     def p(self, key: str, default: Any) -> Any:
         value = getattr(self.cfg, key, None)

@@ -65,7 +65,7 @@ def build_bot(settings: Settings) -> TradingBot:
         settings=settings,
         feed=feed,
         broker=broker,
-        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key),
+        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key, session=cfg.session_cfg),
         risk=RiskManager(cfg.risk),
         state=BotState.load(state_path),
         notifier=notifier,
@@ -183,7 +183,11 @@ def cmd_backtest(args: argparse.Namespace) -> int:
             limits = None
     log.info("%d Kerzen geladen", len(df))
 
-    bt = Backtester(build_strategy(cfg.strategy), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits, protections_cfg=cfg.protections)
+    daytrading = None if args.no_daytrading else cfg.session_cfg
+    bt = Backtester(
+        build_strategy(cfg.strategy, session=daytrading), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits,
+        protections_cfg=cfg.protections, daytrading=daytrading,
+    )
     result = bt.run(df, symbol)
     print(result.summary())
     if args.trades:
@@ -230,11 +234,12 @@ def cmd_check(args: argparse.Namespace) -> int:
     if data is None:
         return 2
     symbol = next(iter(data))
+    daytrading = None if args.no_daytrading else cfg.session_cfg
     print(f"Pruefung auf {symbol}, {len(data[symbol])} Kerzen\n")
     print(f"{'Strategie':24s} {'Blick in die Zukunft':22s} {'Live-Kerzen vs. Historie'}")
     failed = False
     for name in names:
-        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}))
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading)
         look = check_lookahead(strat, data[symbol])
         rec = check_recursive(strat, data[symbol])
         look_text = f"ok ({look.checked} Stellen)" if look.ok else f"FEHLER bei {len(look.mismatches)} Stellen"
@@ -266,8 +271,9 @@ def cmd_compare(args: argparse.Namespace) -> int:
     notes: list[str] = []
     usable: list[str] = []
     first_symbol = next(iter(data))
+    daytrading = None if args.no_daytrading else cfg.session_cfg
     for name in names:
-        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}))
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading)
         look = check_lookahead(strat, data[first_symbol])
         rec = check_recursive(strat, data[first_symbol])
         if not look.ok:
@@ -295,6 +301,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         progress=lambda msg: print(msg, flush=True),
         protections=None if args.no_protections else cfg.protections,
         metric=args.metric,
+        daytrading=daytrading,
     )
     report = format_report(comparison, synthetic=bool(args.demo), notes=notes)
     out = Path(args.out)
@@ -354,6 +361,7 @@ def main(argv: list[str] | None = None) -> int:
     p_bt.add_argument("--until", help="Enddatum YYYY-MM-DD")
     p_bt.add_argument("--trades", action="store_true", help="alle Trades auflisten")
     p_bt.add_argument("--export", help="Trades als CSV speichern")
+    p_bt.add_argument("--no-daytrading", action="store_true", help="Tageshandel-Regeln aus der Konfiguration ignorieren")
     p_bt.set_defaults(func=cmd_backtest)
 
     p_chk = sub.add_parser("check", help="Strategien auf Blick in die Zukunft und Abweichung zwischen Backtest und Live pruefen")
@@ -365,6 +373,7 @@ def main(argv: list[str] | None = None) -> int:
     p_chk.add_argument("--cache-dir", default="data")
     p_chk.add_argument("--demo", choices=["trend", "meanrev", "random"])
     p_chk.add_argument("--demo-bars", type=int, default=6000, help=argparse.SUPPRESS)
+    p_chk.add_argument("--no-daytrading", action="store_true", help="Tageshandel-Regeln aus der Konfiguration ignorieren")
     p_chk.set_defaults(func=cmd_check)
 
     p_cmp = sub.add_parser("compare", help="Alle Strategien mit vielen Parametern vergleichen und die robusteste finden")
@@ -380,6 +389,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("--demo", choices=["trend", "meanrev", "random"], help="Mit synthetischen Daten ausprobieren")
     p_cmp.add_argument("--metric", default="calmar", choices=["calmar", "sharpe", "sortino", "profit"], help="Bewertungsmass fuer die Parameterwahl")
     p_cmp.add_argument("--no-protections", action="store_true", help="Schutzmechanismen im Test abschalten")
+    p_cmp.add_argument("--no-daytrading", action="store_true", help="Tageshandel-Regeln aus der Konfiguration ignorieren")
     p_cmp.add_argument("--demo-bars", type=int, default=20000, help=argparse.SUPPRESS)
     p_cmp.set_defaults(func=cmd_compare)
 

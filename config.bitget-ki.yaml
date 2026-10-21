@@ -15,7 +15,8 @@ symbols:
 quote_currency: USDT
 
 # Kerzen-Zeitrahmen fuer die Strategie (1m, 5m, 15m, 1h, 4h, 1d ...)
-timeframe: 1h
+# Fuer den Tageshandel 5m oder 15m. Kuerzer heisst mehr KI-Aufrufe (Kosten) und mehr Gebuehren.
+timeframe: 15m
 
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
@@ -47,6 +48,17 @@ risk:
   max_open_positions: 3
   max_daily_loss_pct: 3.0    # ab diesem Tagesverlust keine neuen Einstiege mehr bis zum naechsten Tag
   min_order_quote: 10.0      # kleinere Orders werden nicht platziert
+
+# Tageshandel: keine Position ueber Nacht. Uhrzeiten in der angegebenen Zeitzone.
+# Ausserhalb von entry_start bis entry_end wird die KI nur zu offenen Positionen gefragt, nie fuer Einstiege.
+daytrading:
+  enabled: true
+  timezone: Europe/Berlin
+  entry_start: "08:00"       # ab hier neue Einstiege (auch Beginn der Eroeffnungsspanne)
+  entry_end: "21:30"         # danach keine neuen Einstiege mehr
+  flat_time: "22:00"         # ab hier werden alle offenen Positionen verkauft
+  max_trades_per_day: 6      # max. Einstiege pro Tag ueber alle Coins (0 = unbegrenzt)
+  max_hold_minutes: 0        # max. Haltedauer je Position in Minuten (0 = nur flat_time)
 
 notifications:
   telegram_enabled: false
