@@ -29,6 +29,7 @@ class StrategyConfig(BaseModel):
     stop_atr_mult: float = 2.0
     take_profit_atr_mult: float = 4.0
     trailing_stop: bool = True
+    allow_short: bool = False  # Short-Positionen, nur mit market: futures
 
     @field_validator("slow_ema")
     @classmethod
@@ -131,6 +132,13 @@ class AiConfig(BaseModel):
     max_tokens: int = Field(default=16000, ge=2000)
 
 
+class FuturesConfig(BaseModel):
+    """Einstellungen fuer USDT-Perpetual-Futures (noetig fuer Short-Positionen)."""
+
+    leverage: float = Field(default=1.0, ge=1.0, le=10.0)
+    margin_mode: Literal["isolated", "cross"] = "isolated"
+
+
 class DashboardConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=8765, ge=0, le=65535)
@@ -139,6 +147,7 @@ class DashboardConfig(BaseModel):
 class BotConfig(BaseModel):
     mode: Mode = "paper"
     exchange: str = "binance"
+    market: Literal["spot", "futures"] = "spot"
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     quote_currency: str = "USDT"
     timeframe: str = "1h"
@@ -154,6 +163,32 @@ class BotConfig(BaseModel):
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     ai: AiConfig = Field(default_factory=AiConfig)
     daytrading: DaytradingConfig = Field(default_factory=DaytradingConfig)
+    futures: FuturesConfig = Field(default_factory=FuturesConfig)
+
+    @property
+    def is_futures(self) -> bool:
+        return self.market == "futures"
+
+    def market_symbol(self, symbol: str) -> str:
+        """Schreibweise fuer ccxt: bei Futures BTC/USDT -> BTC/USDT:USDT."""
+        if self.is_futures and ":" not in symbol:
+            return f"{symbol}:{symbol.split('/')[1]}"
+        return symbol
+
+    @property
+    def leverage(self) -> float:
+        return self.futures.leverage if self.is_futures else 1.0
+
+    @model_validator(mode="after")
+    def _market_rules(self):
+        if self.strategy.allow_short and not self.is_futures:
+            raise ValueError("Short-Positionen (strategy.allow_short) gehen nur mit market: futures, nicht im Spot-Handel")
+        if self.strategy.allow_short and self.strategy.name == "claude_advisor":
+            raise ValueError("Die KI-Strategie claude_advisor kann noch keine Short-Positionen. Setze allow_short: false.")
+        if self.is_futures:
+            # ccxt-Schreibweise fuer USDT-Perpetuals: BTC/USDT -> BTC/USDT:USDT
+            self.symbols = [s if ":" in s else f"{s}:{s.split('/')[1]}" for s in self.symbols]
+        return self
 
     @property
     def session_cfg(self) -> DaytradingConfig | None:
@@ -200,10 +235,15 @@ class Settings(BaseModel):
                 raise RuntimeError("Live-Modus: EXCHANGE_API_KEY und EXCHANGE_API_SECRET fehlen in .env")
             if self.bot.exchange in PASSPHRASE_EXCHANGES and not self.secrets.exchange_api_password:
                 raise RuntimeError(f"{self.bot.exchange} verlangt zusaetzlich eine Passphrase: EXCHANGE_API_PASSWORD fehlt in .env")
+        if self.mode == "live" and self.bot.is_futures:
+            raise RuntimeError(
+                "Futures (und damit Short-Positionen) sind bisher nur im Papierhandel freigegeben. "
+                "Die Live-Anbindung fuer Futures ist noch nicht gegen eine echte Boerse getestet."
+            )
         if self.bot.strategy.name == "claude_advisor" and not self.secrets.anthropic_api_key:
             raise RuntimeError("Die Strategie claude_advisor braucht ANTHROPIC_API_KEY in .env (Zugang zur Anthropic-API).")
         for symbol in self.bot.symbols:
-            if "/" not in symbol or symbol.split("/")[1] != self.bot.quote_currency:
+            if "/" not in symbol or symbol.split("/")[1].split(":")[0] != self.bot.quote_currency:
                 raise RuntimeError(
                     f"Symbol {symbol} passt nicht zur quote_currency {self.bot.quote_currency}"
                 )

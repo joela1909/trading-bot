@@ -23,6 +23,8 @@ class Broker(Protocol):
     def balance_base(self, symbol: str) -> float: ...
     def buy(self, symbol: str, amount: float) -> Fill: ...
     def sell(self, symbol: str, amount: float) -> Fill: ...
+    def open_position(self, symbol: str, side: str, amount: float) -> Fill: ...
+    def close_position(self, symbol: str, side: str, amount: float) -> Fill: ...
     def limits(self, symbol: str) -> MarketLimits: ...
     def supports_exchange_stop(self) -> bool: ...
     def place_stop(self, symbol: str, amount: float, stop_price: float) -> str | None: ...
@@ -88,6 +90,125 @@ class PaperBroker:
         self.balances[self.quote] = self.balance_quote() + proceeds - fee
         self._save()
         return Fill(symbol, "sell", amount, price, proceeds, fee)
+
+    # Einheitliche Schnittstelle fuer den Bot. Spot kennt nur Long.
+    def open_position(self, symbol: str, side: str, amount: float) -> Fill:
+        if side != "long":
+            raise ValueError("Spot-Handel kann keine Short-Positionen eroeffnen, dafuer market: futures verwenden")
+        return self.buy(symbol, amount)
+
+    def close_position(self, symbol: str, side: str, amount: float) -> Fill:
+        if side != "long":
+            raise ValueError("Spot-Handel hat keine Short-Positionen")
+        return self.sell(symbol, amount)
+
+    def supports_exchange_stop(self) -> bool:
+        return False
+
+    def place_stop(self, symbol: str, amount: float, stop_price: float) -> str | None:
+        return None
+
+    def cancel_stop(self, symbol: str, order_id: str) -> str:
+        return "gone"
+
+    def stop_status(self, symbol: str, order_id: str) -> tuple[str, Fill | None]:
+        return "gone", None
+
+    def limits(self, symbol: str) -> MarketLimits:
+        try:
+            return self.feed.market_limits(symbol)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("Marktlimits fuer %s nicht verfuegbar (%s), nutze Standard", symbol, exc)
+            return MarketLimits()
+
+
+class PaperFuturesBroker:
+    """Simuliert USDT-Perpetual-Futures: Long und Short, Sicherheit = Nennwert / Hebel, Gebuehr auf den Nennwert.
+
+    Finanzierungsgebuehren (Funding) und Liquidation werden nicht simuliert. Bei Hebel 1 und Stop-Loss
+    liegt die Liquidation weit hinter dem Stop."""
+
+    name = "paper"
+
+    def __init__(
+        self,
+        feed: DataFeed,
+        quote_currency: str,
+        starting_balance: float,
+        fee_pct: float,
+        slippage_pct: float,
+        leverage: float = 1.0,
+        state_path: str | Path | None = None,
+    ):
+        self.feed = feed
+        self.quote = quote_currency
+        self.fee_rate = fee_pct / 100.0
+        self.slippage = slippage_pct / 100.0
+        self.leverage = max(1.0, float(leverage))
+        self.state_path = Path(state_path) if state_path else None
+        self.cash = float(starting_balance)
+        # je Paar: Menge mit Vorzeichen (+ Long, - Short), Einstiegskurs und gebundene Sicherheit
+        self.positions: dict[str, dict] = {}
+        if self.state_path and self.state_path.exists():
+            data = json.loads(self.state_path.read_text(encoding="utf-8"))
+            self.cash = float(data.get("cash", starting_balance))
+            self.positions = dict(data.get("positions", {}))
+
+    def _save(self) -> None:
+        if self.state_path:
+            self.state_path.parent.mkdir(parents=True, exist_ok=True)
+            self.state_path.write_text(json.dumps({"cash": self.cash, "positions": self.positions}, indent=2), encoding="utf-8")
+
+    def balance_quote(self) -> float:
+        """Freie Sicherheit, die nicht in Positionen gebunden ist."""
+        return self.cash
+
+    def balance_base(self, symbol: str) -> float:
+        return abs(float(self.positions.get(symbol, {}).get("amount", 0.0)))
+
+    def open_position(self, symbol: str, side: str, amount: float) -> Fill:
+        if symbol in self.positions:
+            raise InsufficientFunds(f"Paper-Futures: fuer {symbol} ist schon eine Position offen")
+        sign = -1 if side == "short" else 1
+        price = self.feed.fetch_price(symbol) * (1.0 + sign * self.slippage)
+        notional = amount * price
+        margin = notional / self.leverage
+        fee = notional * self.fee_rate
+        if margin + fee > self.cash + 1e-9:
+            raise InsufficientFunds(f"Paper-Futures: {margin + fee:.2f} {self.quote} Sicherheit benoetigt, {self.cash:.2f} frei")
+        self.cash -= margin + fee
+        self.positions[symbol] = {"amount": sign * amount, "entry": price, "margin": margin}
+        self._save()
+        return Fill(symbol, "buy" if sign > 0 else "sell", amount, price, notional, fee)
+
+    def close_position(self, symbol: str, side: str, amount: float) -> Fill:
+        pos = self.positions.get(symbol)
+        if pos is None:
+            raise InsufficientFunds(f"Paper-Futures: keine offene Position fuer {symbol}")
+        sign = 1 if pos["amount"] > 0 else -1
+        if (side == "short") != (sign < 0):
+            raise ValueError(f"Paper-Futures: {symbol} ist {'short' if sign < 0 else 'long'}, nicht {side}")
+        held = abs(pos["amount"])
+        amount = min(amount, held)
+        price = self.feed.fetch_price(symbol) * (1.0 - sign * self.slippage)
+        notional = amount * price
+        fee = notional * self.fee_rate
+        share = amount / held
+        pnl = sign * (price - pos["entry"]) * amount
+        self.cash += pos["margin"] * share + pnl - fee
+        if share >= 1.0 - 1e-12:
+            del self.positions[symbol]
+        else:
+            pos["amount"] -= sign * amount
+            pos["margin"] *= 1.0 - share
+        self._save()
+        return Fill(symbol, "sell" if sign > 0 else "buy", amount, price, notional, fee)
+
+    def buy(self, symbol: str, amount: float) -> Fill:
+        return self.open_position(symbol, "long", amount)
+
+    def sell(self, symbol: str, amount: float) -> Fill:
+        return self.close_position(symbol, "long", amount)
 
     def supports_exchange_stop(self) -> bool:
         return False
@@ -198,6 +319,17 @@ class LiveBroker:
         log.warning("LIVE VERKAUF %s %s", amount_str, symbol)
         order = self.exchange.create_order(symbol, "market", "sell", float(amount_str))
         return self._order_to_fill(symbol, "sell", order, float(amount_str))
+
+    # Einheitliche Schnittstelle fuer den Bot. Spot kennt nur Long.
+    def open_position(self, symbol: str, side: str, amount: float) -> Fill:
+        if side != "long":
+            raise ValueError("Spot-Handel kann keine Short-Positionen eroeffnen, dafuer market: futures verwenden")
+        return self.buy(symbol, amount)
+
+    def close_position(self, symbol: str, side: str, amount: float) -> Fill:
+        if side != "long":
+            raise ValueError("Spot-Handel hat keine Short-Positionen")
+        return self.sell(symbol, amount)
 
     def limits(self, symbol: str) -> MarketLimits:
         market = self.exchange.market(symbol)

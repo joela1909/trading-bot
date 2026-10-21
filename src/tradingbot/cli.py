@@ -15,7 +15,7 @@ from .bot import TradingBot
 from .config import Settings, load_settings
 from .dashboard import DashboardServer
 from .data import CcxtDataFeed, load_csv, load_history
-from .exchange import LiveBroker, PaperBroker
+from .exchange import LiveBroker, PaperBroker, PaperFuturesBroker
 from .logging_setup import setup_logging
 from .notify import Notifier, TelegramNotifier
 from .risk import RiskManager
@@ -34,7 +34,7 @@ def build_bot(settings: Settings) -> TradingBot:
     state_dir = Path(cfg.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    feed = CcxtDataFeed(cfg.exchange)
+    feed = CcxtDataFeed(cfg.exchange, market_type=cfg.market)
     if mode == "live":
         broker = LiveBroker(
             cfg.exchange,
@@ -44,6 +44,16 @@ def build_bot(settings: Settings) -> TradingBot:
             password=settings.secrets.exchange_api_password,
         )
         log.warning("LIVE-MODUS AKTIV: Der Bot handelt mit echtem Geld auf %s.", cfg.exchange)
+    elif cfg.is_futures:
+        broker = PaperFuturesBroker(
+            feed,
+            cfg.quote_currency,
+            cfg.paper.starting_balance,
+            cfg.paper.fee_pct,
+            cfg.paper.slippage_pct,
+            leverage=cfg.leverage,
+            state_path=state_dir / "paper_futures_balances.json",
+        )
     else:
         broker = PaperBroker(
             feed,
@@ -60,12 +70,13 @@ def build_bot(settings: Settings) -> TradingBot:
     else:
         notifier = Notifier()
 
-    state_path = state_dir / f"state_{mode}.json"
+    # Futures bekommen einen eigenen Zustand, damit sich Spot- und Futures-Positionen nie vermischen
+    state_path = state_dir / (f"state_{mode}_futures.json" if cfg.is_futures else f"state_{mode}.json")
     return TradingBot(
         settings=settings,
         feed=feed,
         broker=broker,
-        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key, session=cfg.session_cfg),
+        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key, session=cfg.session_cfg, timeframe=cfg.timeframe),
         risk=RiskManager(cfg.risk),
         state=BotState.load(state_path),
         notifier=notifier,
@@ -160,7 +171,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
     cfg = settings.bot
     timeframe = args.timeframe or cfg.timeframe
-    symbol = args.symbol or cfg.symbols[0]
+    symbol = cfg.market_symbol(args.symbol) if args.symbol else cfg.symbols[0]
     if cfg.strategy.name in LIVE_ONLY:
         print(f"Die Strategie {cfg.strategy.name} ist nicht backtestbar. Nutze den Papierhandel: tradingbot run", file=sys.stderr)
         return 2
@@ -172,7 +183,7 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         if not args.since:
             print("Entweder --csv oder --since YYYY-MM-DD angeben.", file=sys.stderr)
             return 2
-        feed = CcxtDataFeed(cfg.exchange)
+        feed = CcxtDataFeed(cfg.exchange, market_type=cfg.market)
         since_ms = int(datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc).timestamp() * 1000)
         until_ms = int(datetime.fromisoformat(args.until).replace(tzinfo=timezone.utc).timestamp() * 1000) if args.until else None
         log.info("Lade %s %s ab %s von %s ...", symbol, timeframe, args.since, cfg.exchange)
@@ -185,8 +196,8 @@ def cmd_backtest(args: argparse.Namespace) -> int:
 
     daytrading = None if args.no_daytrading else cfg.session_cfg
     bt = Backtester(
-        build_strategy(cfg.strategy, session=daytrading), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits,
-        protections_cfg=cfg.protections, daytrading=daytrading,
+        build_strategy(cfg.strategy, session=daytrading, timeframe=timeframe), RiskManager(cfg.risk), cfg.strategy, cfg.paper, limits,
+        protections_cfg=cfg.protections, daytrading=daytrading, leverage=cfg.leverage,
     )
     result = bt.run(df, symbol)
     print(result.summary())
@@ -211,8 +222,8 @@ def _load_market_data(args: argparse.Namespace, cfg, timeframe: str):
     if not args.since:
         print("Bitte --since YYYY-MM-DD angeben (oder --demo trend|meanrev|random zum Ausprobieren).", file=sys.stderr)
         return None
-    symbols = [x.strip() for x in args.symbols.split(",")] if args.symbols else cfg.symbols
-    feed = CcxtDataFeed(cfg.exchange)
+    symbols = [cfg.market_symbol(x.strip()) for x in args.symbols.split(",")] if args.symbols else cfg.symbols
+    feed = CcxtDataFeed(cfg.exchange, market_type=cfg.market)
     return {s: load_history(feed, s, timeframe, args.since, args.until, args.cache_dir) for s in symbols}
 
 
@@ -239,7 +250,7 @@ def cmd_check(args: argparse.Namespace) -> int:
     print(f"{'Strategie':24s} {'Blick in die Zukunft':22s} {'Live-Kerzen vs. Historie'}")
     failed = False
     for name in names:
-        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading)
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading, timeframe=timeframe)
         look = check_lookahead(strat, data[symbol])
         rec = check_recursive(strat, data[symbol])
         look_text = f"ok ({look.checked} Stellen)" if look.ok else f"FEHLER bei {len(look.mismatches)} Stellen"
@@ -273,7 +284,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
     first_symbol = next(iter(data))
     daytrading = None if args.no_daytrading else cfg.session_cfg
     for name in names:
-        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading)
+        strat = build_strategy(cfg.strategy.model_copy(update={"name": name}), session=daytrading, timeframe=timeframe)
         look = check_lookahead(strat, data[first_symbol])
         rec = check_recursive(strat, data[first_symbol])
         if not look.ok:
@@ -302,6 +313,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         protections=None if args.no_protections else cfg.protections,
         metric=args.metric,
         daytrading=daytrading,
+        leverage=cfg.leverage,
     )
     report = format_report(comparison, synthetic=bool(args.demo), notes=notes)
     out = Path(args.out)

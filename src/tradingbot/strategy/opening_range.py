@@ -15,11 +15,14 @@ class OpeningRangeBreakoutStrategy(Strategy):
     name = "opening_range"
     buy_reason = "Ausbruch ueber die Eroeffnungsspanne"
     sell_reason = "Schlusskurs unter dem Tages-VWAP"
+    short_reason = "Ausbruch unter die Eroeffnungsspanne"
+    cover_reason = "Schlusskurs ueber dem Tages-VWAP"
     param_grid = {"orb_minutes": [30, 60, 120], "trend_ema": [0, 200]}
 
     @property
     def warmup_bars(self) -> int:
-        return max(300, WARMUP_FACTOR * max(self.p("trend_ema", 0), self.cfg.atr_period))
+        day = (self.bars_per_day or 0) + 20
+        return max(300, day, WARMUP_FACTOR * max(self.p("trend_ema", 0), self.cfg.atr_period))
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         ts = df["timestamp"].astype("int64")
@@ -49,3 +52,12 @@ class OpeningRangeBreakoutStrategy(Strategy):
             buy = buy & (df["close"] > df["ema_trend"]).to_numpy()
         sell = (df["close"] < df["vwap"]).to_numpy() & df["atr"].notna().to_numpy()
         return buy, sell
+
+    def short_signals(self, df):
+        below = (df["close"] < df["or_low"]).to_numpy()
+        prev_below = np.concatenate([[False], below[:-1]])
+        short = below & ~prev_below & (df["atr"] > 0).to_numpy()
+        if self.p("trend_ema", 0) > 0:
+            short = short & (df["close"] < df["ema_trend"]).to_numpy()
+        cover = (df["close"] > df["vwap"]).to_numpy() & df["atr"].notna().to_numpy()
+        return short, cover

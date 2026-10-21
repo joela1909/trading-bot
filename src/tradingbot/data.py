@@ -52,12 +52,15 @@ class DataFeed(Protocol):
 class CcxtDataFeed:
     """Oeffentliche Marktdaten ueber ccxt (ohne API-Key nutzbar)."""
 
-    def __init__(self, exchange_id: str, ccxt_exchange=None):
+    def __init__(self, exchange_id: str, ccxt_exchange=None, market_type: str = "spot"):
         if ccxt_exchange is None:
             import ccxt
 
             cls = getattr(ccxt, exchange_id)
-            ccxt_exchange = cls({"enableRateLimit": True})
+            params: dict = {"enableRateLimit": True}
+            if market_type == "futures":
+                params["options"] = {"defaultType": "swap"}
+            ccxt_exchange = cls(params)
         self.exchange = ccxt_exchange
         self._markets_loaded = False
 
@@ -136,7 +139,8 @@ def load_history(feed: "CcxtDataFeed", symbol: str, timeframe: str, since: str, 
     from datetime import datetime, timezone
 
     until_label = until or datetime.now(timezone.utc).strftime("%Y-%m-%d")
-    path = Path(cache_dir) / f"{symbol.replace('/', '_')}_{timeframe}_{since}_{until_label}.csv"
+    safe = symbol.replace("/", "_").replace(":", "-")
+    path = Path(cache_dir) / f"{safe}_{timeframe}_{since}_{until_label}.csv"
     if path.exists():
         log.info("%s: aus Zwischenspeicher %s", symbol, path)
         return load_csv(path)

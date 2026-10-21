@@ -156,6 +156,8 @@ class Comparison:
     end_date: str
     metric: str = "calmar"
     daytrading: DaytradingConfig | None = None
+    allow_short: bool = False
+    leverage: float = 1.0
 
     @property
     def ranking(self) -> list[StrategyOutcome]:
@@ -182,6 +184,7 @@ def run_comparison(
     protections: ProtectionConfig | None = None,
     metric: str = "calmar",
     daytrading: DaytradingConfig | None = None,
+    leverage: float = 1.0,
 ) -> Comparison:
     if daytrading is not None and not daytrading.enabled:
         daytrading = None
@@ -207,18 +210,18 @@ def run_comparison(
         for ind_key, variants in groups.items():
             ind_params = dict(ind_key)
             first_cfg = base_cfg.model_copy(update={"name": name, **ind_params})
-            first_strategy = REGISTRY[name](first_cfg, daytrading)
+            first_strategy = REGISTRY[name](first_cfg, daytrading, timeframe)
             prepared = {}
             for s, df in data.items():
                 if len(df) < first_strategy.warmup_bars + 50:
                     raise ValueError(f"{s}: zu wenig Kerzen ({len(df)}) fuer {name}")
                 p = first_strategy.prepare(df)
-                prepared[s] = (p, first_strategy.signals(p))
+                prepared[s] = (p, first_strategy.all_signals(p))
 
             for params in variants:
                 cfg = base_cfg.model_copy(update={"name": name, **params})
-                strategy = REGISTRY[name](cfg, daytrading)
-                bt = Backtester(strategy, risk, cfg, paper_cfg, protections_cfg=protections, daytrading=daytrading)
+                strategy = REGISTRY[name](cfg, daytrading, timeframe)
+                bt = Backtester(strategy, risk, cfg, paper_cfg, protections_cfg=protections, daytrading=daytrading, leverage=leverage)
                 is_res, oos_res = [], []
                 for s in symbols:
                     p, sig = prepared[s]
@@ -256,6 +259,8 @@ def run_comparison(
         end_date=date(first, len(first) - 1),
         metric=metric,
         daytrading=daytrading,
+        allow_short=base_cfg.allow_short,
+        leverage=leverage,
     )
 
 
@@ -290,6 +295,7 @@ def format_report(cmp: Comparison, synthetic: bool = False, notes: list[str] | N
         f"- **Pruefzeitraum:** danach, nie zur Auswahl benutzt. Nur dieser Zeitraum zaehlt fuer die Bewertung.",
         f"- **Kosten:** Gebuehr {cmp.fee_pct}% pro Order, Kursabweichung {cmp.slippage_pct}%",
         _daytrading_line(cmp.daytrading),
+        f"- **Richtung:** Long und Short (Futures, Hebel {cmp.leverage:g})" if cmp.allow_short else "- **Richtung:** nur Long",
         f"- **Buy & Hold im Pruefzeitraum:** {cmp.buy_hold_oos:+.1f}% (Vergleichswert, ohne Handel)",
         "",
         "## Rangliste nach Rendite im Pruefzeitraum",

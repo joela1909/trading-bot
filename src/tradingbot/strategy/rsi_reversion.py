@@ -13,6 +13,8 @@ class RsiReversionStrategy(Strategy):
     name = "rsi_reversion"
     buy_reason = "RSI ueberverkauft"
     sell_reason = "RSI erholt"
+    short_reason = "RSI ueberkauft"
+    cover_reason = "RSI abgekuehlt"
     param_grid = {"rsi_buy": [25, 30, 35], "rsi_sell": [50, 60, 70], "trend_ema": [0, 200]}
 
     @property
@@ -31,3 +33,11 @@ class RsiReversionStrategy(Strategy):
             buy = buy & (df["close"] > df["ema_trend"]).to_numpy()
         sell = (df["rsi"] > self.p("rsi_sell", 55)).to_numpy()
         return buy, sell
+
+    def short_signals(self, df):
+        # gespiegelte Schwellen: rsi_buy=30 -> Short ueber 70, rsi_sell=55 -> Ausstieg unter 45
+        short = (df["rsi"] > 100.0 - self.p("rsi_buy", 30)).to_numpy() & (df["atr"] > 0).to_numpy()
+        if self.p("trend_ema", 0) > 0:
+            short = short & (df["close"] < df["ema_trend"]).to_numpy()
+        cover = (df["rsi"] < 100.0 - self.p("rsi_sell", 55)).to_numpy()
+        return short, cover

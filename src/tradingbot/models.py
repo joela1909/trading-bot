@@ -10,9 +10,15 @@ def utcnow_iso() -> str:
 
 
 class Signal(str, Enum):
-    BUY = "buy"
-    SELL = "sell"
+    BUY = "buy"  # Long eroeffnen
+    SELL = "sell"  # Long schliessen
+    SHORT = "short"  # Short eroeffnen
+    COVER = "cover"  # Short schliessen
     HOLD = "hold"
+
+
+def side_sign(side: str) -> int:
+    return -1 if side == "short" else 1
 
 
 @dataclass
@@ -51,11 +57,33 @@ class Position:
     stop_loss: float
     take_profit: float | None
     opened_at: str
-    highest_price: float
+    highest_price: float  # bester Kurs seit Einstieg: bei Long das Hoch, bei Short das Tief (fuer den Trailing-Stop)
     entry_fee: float = 0.0
     atr_at_entry: float | None = None
     stop_order_id: str | None = None
     exchange_stop: float | None = None
+    side: str = "long"  # long | short
+    leverage: float = 1.0
+
+    @property
+    def is_short(self) -> bool:
+        return self.side == "short"
+
+    def unrealized(self, price: float) -> float:
+        """Kursgewinn ohne Gebuehren."""
+        return side_sign(self.side) * (price - self.entry_price) * self.amount
+
+    def value(self, price: float) -> float:
+        """Wert der Position im Konto: gebundene Sicherheit plus Kursgewinn. Spot-Long: Menge * Kurs."""
+        return self.entry_price * self.amount / self.leverage + self.unrealized(price)
+
+    def stop_hit(self, price: float) -> bool:
+        return price >= self.stop_loss if self.is_short else price <= self.stop_loss
+
+    def take_profit_hit(self, price: float) -> bool:
+        if self.take_profit is None:
+            return False
+        return price <= self.take_profit if self.is_short else price >= self.take_profit
 
     def to_dict(self) -> dict:
         return asdict(self)
@@ -77,6 +105,7 @@ class Trade:
     opened_at: str
     closed_at: str
     reason: str
+    side: str = "long"
 
     def to_dict(self) -> dict:
         return asdict(self)

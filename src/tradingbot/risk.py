@@ -17,19 +17,22 @@ class RiskManager:
         entry_price: float,
         stop_loss: float,
         limits: MarketLimits | None = None,
+        side: str = "long",
+        leverage: float = 1.0,
     ) -> float:
-        """Positionsgroesse in Basiswaehrung. 0 bedeutet: keine Order."""
+        """Positionsgroesse in Basiswaehrung. 0 bedeutet: keine Order.
+        Bei Short liegt der Stop ueber dem Einstieg. Mit Hebel bindet die Position nur Nennwert / Hebel an Sicherheit."""
         limits = limits or MarketLimits()
         if entry_price <= 0 or equity <= 0 or free_quote <= 0:
             return 0.0
-        per_unit_risk = entry_price - stop_loss
+        per_unit_risk = stop_loss - entry_price if side == "short" else entry_price - stop_loss
         if per_unit_risk <= 0:
             return 0.0
 
         risk_amount = equity * self.cfg.risk_per_trade_pct / 100.0
         amount = risk_amount / per_unit_risk
 
-        max_quote = min(equity * self.cfg.max_position_pct / 100.0, free_quote * 0.99)
+        max_quote = min(equity * self.cfg.max_position_pct / 100.0, free_quote * 0.99 * max(leverage, 1.0))
         amount = min(amount, max_quote / entry_price)
 
         amount = self._round_down(amount, limits.amount_precision)

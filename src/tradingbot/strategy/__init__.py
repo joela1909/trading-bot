@@ -26,6 +26,7 @@ def build_strategy(
     api_key: str = "",
     client=None,
     session: DaytradingConfig | None = None,
+    timeframe: str | None = None,
 ) -> Strategy:
     if cfg.name in LIVE_ONLY:
         strategy = ClaudeAdvisorStrategy(cfg, ai or AiConfig(), api_key=api_key, client=client)
@@ -36,7 +37,7 @@ def build_strategy(
         cls = REGISTRY[cfg.name]
     except KeyError as exc:
         raise ValueError(f"Unbekannte Strategie '{cfg.name}'. Verfuegbar: {sorted(REGISTRY) + sorted(LIVE_ONLY)}") from exc
-    return cls(cfg, session)
+    return cls(cfg, session, timeframe)
 
 
 __all__ = ["Strategy", "EXIT_GRID", "REGISTRY", "LIVE_ONLY", "build_strategy"]

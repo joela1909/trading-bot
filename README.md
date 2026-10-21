@@ -1,7 +1,7 @@
 # Trading Bot
 
-Vollautomatischer Krypto-Trading-Bot für den Spot-Handel (long-only) auf Basis von
-[ccxt](https://github.com/ccxt/ccxt), spezialisiert auf **Tageshandel (Daytrading)**: Einstiege nur in einem
+Vollautomatischer Krypto-Trading-Bot auf Basis von [ccxt](https://github.com/ccxt/ccxt), für Spot (nur Long)
+oder USDT-Futures (**Long und Short**), spezialisiert auf **Tageshandel (Daytrading)**: Einstiege nur in einem
 festen Zeitfenster, alle Positionen werden vor Feierabend geschlossen, nichts läuft über Nacht. Der Bot verwaltet Stop-Loss, Take-Profit und Trailing-Stop selbst
 und begrenzt das Risiko pro Trade und pro Tag.
 
@@ -19,6 +19,8 @@ und begrenzt das Risiko pro Trade und pro Tag.
 - **Tageshandel** (Standard, Abschnitt `daytrading` in der Konfiguration): Einstiegsfenster (z. B. 08:00–21:30),
   Zwangsschließung aller Positionen ab `flat_time` (z. B. 22:00), max. Einstiege pro Tag, optionale max. Haltedauer.
   Uhrzeiten in deiner Zeitzone inkl. Sommerzeit. Gilt auch für den KI-Bot. Backtest und Vergleich nutzen dieselben Regeln.
+- **Short-Positionen** über USDT-Perpetual-Futures (`market: futures`, `strategy.allow_short: true`), Hebel einstellbar,
+  Standard 1. Alle Strategien haben gespiegelte Short-Signale. Futures laufen bisher nur im Papierhandel.
 - **Sieben Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop.
   Für den Tageshandel: `vwap_reversion` (Kauf deutlich unter dem Tages-VWAP, Verkauf am VWAP) und
   `opening_range` (Ausbruch über die Eröffnungsspanne ab `entry_start`). Außerdem `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
@@ -259,12 +261,38 @@ daraus sagen nichts über echte Märkte.
 Grenzen: Ein Backtest kennt keine Orderbuchtiefe, keine Latenz und keine Handelsausfälle. Ein einzelner
 Prüfzeitraum ist keine Garantie. Teste einen Gewinner anschließend mehrere Wochen im Papierhandel.
 
-## Tageshandel
+## Short-Positionen (Futures)
 
-Standardmäßig handelt der Bot nur innerhalb eines Tages auf 15-Minuten-Kerzen, in `config.yaml` und `config.bitget-ki.yaml`:
+Im Spot-Handel kann man nur kaufen, was man hat. Für Shorts handelt der Bot USDT-Perpetual-Futures:
 
 ```yaml
-timeframe: 15m
+market: futures            # spot | futures
+symbols: [BTC/USDT, ETH/USDT, SOL/USDT]   # wird automatisch zu BTC/USDT:USDT usw.
+futures:
+  leverage: 1              # 1 = kein zusätzliches Risiko durch Hebel
+  margin_mode: isolated
+strategy:
+  allow_short: true
+paper:
+  fee_pct: 0.05            # Futures-Gebühren sind niedriger als Spot
+```
+
+- **Signale:** Jede Strategie hat gespiegelte Short-Regeln, z. B. `vwap_reversion` shortet, wenn der Kurs mehrere ATR
+  **über** dem Tages-VWAP liegt, und schließt am VWAP. Trendfilter: Long nur über, Short nur unter `trend_ema`.
+- **Stop-Loss** liegt bei Short über dem Einstieg, Take-Profit darunter. Der Trailing-Stop zieht bei fallenden Kursen nach unten nach.
+- **Konto:** Eine Position bindet Nennwert / Hebel als Sicherheit. Gebühren fallen auf den Nennwert an.
+- **Grenzen:** Funding-Gebühren und Liquidation werden im Papierhandel und Backtest nicht simuliert. Bei Hebel 1
+  liegt die Liquidation weit hinter dem Stop. **Live-Handel mit Futures ist gesperrt**, bis die Anbindung gegen
+  eine echte Börse getestet ist. Der KI-Bot (`claude_advisor`) kann noch nicht shorten.
+- Futures haben einen eigenen Zustand (`state/state_paper_futures.json`), Spot-Positionen werden nicht vermischt.
+- Prüfe vorher, ob dein Wohnsitzland Krypto-Derivate bei deiner Börse überhaupt erlaubt.
+
+## Tageshandel
+
+Standardmäßig handelt der Bot nur innerhalb eines Tages, in `config.yaml` auf 1-Minuten-Kerzen, im KI-Bot auf 15-Minuten-Kerzen:
+
+```yaml
+timeframe: 1m
 daytrading:
   enabled: true
   timezone: Europe/Berlin
@@ -376,7 +404,7 @@ src/tradingbot/
 ├── snapshot.py       Datenstand für das Dashboard (Kennzahlen, Positionen, Verlauf)
 ├── config.py         config.yaml + .env (pydantic)
 ├── data.py           Marktdaten über ccxt, CSV-Import
-├── exchange.py       PaperBroker (Simulation) und LiveBroker (ccxt)
+├── exchange.py       PaperBroker (Spot), PaperFuturesBroker (Long/Short) und LiveBroker (ccxt, Spot)
 ├── indicators.py     EMA, RSI, ATR, MACD, Tages-VWAP
 ├── risk.py           Positionsgröße, Limits
 ├── state.py          Persistenter Zustand

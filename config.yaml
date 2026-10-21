@@ -4,19 +4,25 @@ mode: paper
 # ccxt-Boersen-ID, z. B. binance, kraken, bybit, okx, coinbase, bitget
 exchange: binance
 
-# Handelspaare (Spot). Die Quote-Waehrung muss bei allen Paaren gleich sein.
+# Markt: spot (nur Long) | futures (USDT-Perpetuals, Long und Short)
+# Futures laufen bisher nur im Papierhandel. Funding-Gebuehren werden nicht simuliert.
+market: futures
+
+# Handelspaare. Bei futures wird automatisch die Perpetual-Schreibweise genutzt (BTC/USDT -> BTC/USDT:USDT).
+# Die Quote-Waehrung muss bei allen Paaren gleich sein.
 symbols:
   - BTC/USDT
   - ETH/USDT
+  - SOL/USDT
 quote_currency: USDT
 
 # Kerzen-Zeitrahmen fuer die Strategie (1m, 5m, 15m, 1h, 4h, 1d ...)
-# Fuer den Tageshandel 5m oder 15m. Kuerzer heisst mehr Trades und damit mehr Gebuehren.
-timeframe: 15m
+# 1m: sehr viele kleine Bewegungen, die Gebuehren fressen einen grossen Teil jedes Gewinns.
+timeframe: 1m
 
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
-poll_interval_seconds: 60
+poll_interval_seconds: 15
 
 # Verzeichnis fuer Zustand (offene Positionen, Trade-Historie) und Logs
 state_dir: state
@@ -24,32 +30,47 @@ log_dir: logs
 
 paper:
   starting_balance: 1000.0   # in Quote-Waehrung
-  fee_pct: 0.1               # Handelsgebuehr pro Order in Prozent
+  fee_pct: 0.05              # Gebuehr pro Order in Prozent (Binance-Futures, Taker, Standardstufe)
   slippage_pct: 0.05         # angenommene Kursabweichung bei Market-Orders in Prozent
+
+# Futures: Hebel 1 heisst kein zusaetzliches Risiko durch Hebel. Die Sicherheit je Position ist Nennwert / Hebel.
+futures:
+  leverage: 1
+  margin_mode: isolated
 
 strategy:
   # Tageshandel: vwap_reversion | opening_range
   # Ohne Tageshandel gedacht, laufen aber auch damit: ema_cross | donchian | macd_trend | rsi_reversion | bollinger_reversion
-  # KI: claude_advisor (siehe config.bitget-ki.yaml)
+  # KI: claude_advisor (siehe config.bitget-ki.yaml, kann noch nicht shorten)
   name: vwap_reversion
-  vwap_dev_atr: 3.0          # vwap_reversion: Kauf, wenn der Kurs so viele ATR unter dem Tages-VWAP liegt
+  allow_short: true          # Short-Positionen eroeffnen (nur mit market: futures)
+  vwap_dev_atr: 3.0          # vwap_reversion: Einstieg, wenn der Kurs so viele ATR unter (Long) bzw. ueber (Short) dem Tages-VWAP liegt
   orb_minutes: 60            # opening_range: Laenge der Eroeffnungsspanne ab entry_start
-  trend_ema: 200             # 0 = aus, sonst nur kaufen, wenn der Kurs ueber dieser EMA liegt
+  trend_ema: 200             # 0 = aus, sonst Long nur ueber und Short nur unter dieser EMA
   fast_ema: 20
   slow_ema: 50
   rsi_period: 14
-  rsi_max_entry: 70          # kein Einstieg, wenn der Markt bereits ueberkauft ist
+  rsi_max_entry: 70          # kein Long, wenn der Markt bereits ueberkauft ist (Short gespiegelt: nicht unter 30)
   atr_period: 14
-  stop_atr_mult: 3.0         # Stop-Loss = Einstieg - 3 * ATR
-  take_profit_atr_mult: 4.0  # Take-Profit = Einstieg + 4 * ATR (0 = deaktiviert)
-  trailing_stop: true        # Stop-Loss zieht bei steigenden Kursen nach
+  stop_atr_mult: 3.0         # Stop-Loss = 3 * ATR gegen die Position (Long darunter, Short darueber)
+  take_profit_atr_mult: 4.0  # Take-Profit = 4 * ATR in Richtung der Position (0 = deaktiviert)
+  trailing_stop: true        # Stop-Loss zieht nach, wenn der Kurs in Richtung der Position laeuft
 
 risk:
   risk_per_trade_pct: 1.0    # max. Verlust pro Trade (Abstand zum Stop) in % des Kapitals
-  max_position_pct: 25.0     # max. Positionsgroesse in % des Kapitals
+  max_position_pct: 25.0     # max. Positionsgroesse (Nennwert) in % des Kapitals
   max_open_positions: 3
   max_daily_loss_pct: 3.0    # ab diesem Tagesverlust keine neuen Einstiege mehr bis zum naechsten Tag
-  min_order_quote: 10.0      # kleinere Orders werden nicht platziert
+  min_order_quote: 10.0      # kleinere Orders werden nicht platziert (BTC-Futures verlangen mind. 50 USDT)
+
+# Schutzmechanismen, gezaehlt in Kerzen. Bei 1m-Kerzen entsprechend mehr Kerzen.
+protections:
+  cooldown_candles: 5               # nach einem Ausstieg 5 Minuten kein neuer Einstieg im selben Paar
+  stoploss_guard_stops: 3           # 3 Stop-Losses ...
+  stoploss_guard_window_candles: 60 # ... innerhalb von 60 Minuten ...
+  stoploss_guard_lock_candles: 60   # ... sperren alle Einstiege fuer 60 Minuten
+  max_drawdown_pct: 20.0
+  max_drawdown_lock_candles: 240    # 4 Stunden Sperre nach zu grossem Drawdown
 
 # Tageshandel: keine Position ueber Nacht. Uhrzeiten in der angegebenen Zeitzone.
 daytrading:
@@ -57,7 +78,7 @@ daytrading:
   timezone: Europe/Berlin
   entry_start: "08:00"       # ab hier neue Einstiege (auch Beginn der Eroeffnungsspanne)
   entry_end: "21:30"         # danach keine neuen Einstiege mehr
-  flat_time: "22:00"         # ab hier werden alle offenen Positionen verkauft
+  flat_time: "22:00"         # ab hier werden alle offenen Positionen geschlossen
   max_trades_per_day: 6      # max. Einstiege pro Tag ueber alle Coins (0 = unbegrenzt)
   max_hold_minutes: 0        # max. Haltedauer je Position in Minuten (0 = nur flat_time)
 
