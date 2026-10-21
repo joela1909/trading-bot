@@ -22,7 +22,7 @@ from .risk import RiskManager
 from .snapshot import make_snapshot
 from .state import BotState
 from .research import format_report, grid_dataframe, run_comparison
-from .strategy import REGISTRY, build_strategy
+from .strategy import LIVE_ONLY, REGISTRY, build_strategy
 from .synthetic import make_series
 
 log = logging.getLogger(__name__)
@@ -65,7 +65,7 @@ def build_bot(settings: Settings) -> TradingBot:
         settings=settings,
         feed=feed,
         broker=broker,
-        strategy=build_strategy(cfg.strategy),
+        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key),
         risk=RiskManager(cfg.risk),
         state=BotState.load(state_path),
         notifier=notifier,
@@ -132,6 +132,11 @@ def cmd_dashboard(args: argparse.Namespace) -> int:
             last_cycle=state.equity_history[-1][0] if state.equity_history else None,
             running=False,
             controls=False,
+            ai_meta=(
+                {"model": cfg.ai.model, "effort": cfg.ai.effort, "max_calls": cfg.ai.max_calls_per_day, "min_confidence": cfg.ai.min_confidence}
+                if cfg.strategy.name in LIVE_ONLY
+                else None
+            ),
         )
 
     try:
@@ -156,6 +161,9 @@ def cmd_backtest(args: argparse.Namespace) -> int:
     cfg = settings.bot
     timeframe = args.timeframe or cfg.timeframe
     symbol = args.symbol or cfg.symbols[0]
+    if cfg.strategy.name in LIVE_ONLY:
+        print(f"Die Strategie {cfg.strategy.name} ist nicht backtestbar. Nutze den Papierhandel: tradingbot run", file=sys.stderr)
+        return 2
 
     if args.csv:
         df = load_csv(args.csv)
@@ -210,6 +218,10 @@ def cmd_check(args: argparse.Namespace) -> int:
     cfg = settings.bot
     timeframe = args.timeframe or cfg.timeframe
     names = [n.strip() for n in args.strategies.split(",")] if args.strategies else list(REGISTRY)
+    live_only = [n for n in names if n in LIVE_ONLY]
+    if live_only:
+        print(f"{live_only} ist nicht backtestbar (die KI kennt die Vergangenheit teilweise aus dem Training). Nur Papier- oder Live-Handel.", file=sys.stderr)
+        return 2
     unknown = [n for n in names if n not in REGISTRY]
     if unknown:
         print(f"Unbekannte Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
@@ -238,6 +250,10 @@ def cmd_compare(args: argparse.Namespace) -> int:
     cfg = settings.bot
     timeframe = args.timeframe or cfg.timeframe
     names = [n.strip() for n in args.strategies.split(",")] if args.strategies else list(REGISTRY)
+    live_only = [n for n in names if n in LIVE_ONLY]
+    if live_only:
+        print(f"{live_only} ist nicht backtestbar (die KI kennt die Vergangenheit teilweise aus dem Training). Nur Papier- oder Live-Handel.", file=sys.stderr)
+        return 2
     unknown = [n for n in names if n not in REGISTRY]
     if unknown:
         print(f"Unbekannte Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
@@ -278,6 +294,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
         min_trades=args.min_trades,
         progress=lambda msg: print(msg, flush=True),
         protections=None if args.no_protections else cfg.protections,
+        metric=args.metric,
     )
     report = format_report(comparison, synthetic=bool(args.demo), notes=notes)
     out = Path(args.out)
@@ -361,6 +378,7 @@ def main(argv: list[str] | None = None) -> int:
     p_cmp.add_argument("--cache-dir", default="data", help="Zwischenspeicher fuer heruntergeladene Kerzen")
     p_cmp.add_argument("--out", default="reports", help="Ordner fuer den Bericht")
     p_cmp.add_argument("--demo", choices=["trend", "meanrev", "random"], help="Mit synthetischen Daten ausprobieren")
+    p_cmp.add_argument("--metric", default="calmar", choices=["calmar", "sharpe", "sortino", "profit"], help="Bewertungsmass fuer die Parameterwahl")
     p_cmp.add_argument("--no-protections", action="store_true", help="Schutzmechanismen im Test abschalten")
     p_cmp.add_argument("--demo-bars", type=int, default=20000, help=argparse.SUPPRESS)
     p_cmp.set_defaults(func=cmd_compare)
@@ -370,4 +388,8 @@ def main(argv: list[str] | None = None) -> int:
     p_st.set_defaults(func=cmd_status)
 
     args = parser.parse_args(argv)
-    return args.func(args)
+    try:
+        return args.func(args)
+    except RuntimeError as exc:
+        print(f"Fehler: {exc}", file=sys.stderr)
+        return 2

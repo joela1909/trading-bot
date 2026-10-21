@@ -160,3 +160,28 @@ def test_load_history_paginates_and_caches(tmp_path):
     again = load_history(feed, "BTC/USDT", "1h", since, "2025-01-01", tmp_path)
     assert ex.calls == calls and len(again) == 2500
     assert (tmp_path / "BTC_USDT_1h_2024-01-01_2025-01-01.csv").exists()
+
+
+def test_metrics_rank_and_validate():
+    from tradingbot.research import METRICS, metric_value, selection_score
+
+    data = {"A/USDT": make_series("trend", 6000, 1)}
+    cmp = run_comparison(data, ["ema_cross"], StrategyConfig(), RiskConfig(), PaperConfig(), "1h", split=0.6, min_trades=5)
+    best = cmp.outcomes[0].best
+    for m in METRICS:
+        v = metric_value(best.is_results[0], m)
+        assert v == v and abs(v) < 1e6
+    assert metric_value(best.is_results[0], "profit") == best.is_results[0].total_return_pct
+    assert selection_score(best.is_results, 10**9) == -1e9
+    with pytest.raises(ValueError):
+        metric_value(best.is_results[0], "nope")
+    with pytest.raises(ValueError):
+        run_comparison(data, ["ema_cross"], StrategyConfig(), RiskConfig(), PaperConfig(), "1h", metric="nope")
+
+
+@pytest.mark.parametrize("metric", ["sharpe", "sortino", "profit"])
+def test_comparison_runs_with_every_metric(metric):
+    data = {"A/USDT": make_series("trend", 6000, 1), "B/USDT": make_series("trend", 6000, 2)}
+    cmp = run_comparison(data, ["ema_cross", "donchian"], StrategyConfig(), RiskConfig(), PaperConfig(), "1h", metric=metric, min_trades=5)
+    assert cmp.metric == metric and len(cmp.outcomes) == 2
+    assert metric in {"sharpe", "sortino", "profit"} and "Auswahlzeitraum" in format_report(cmp)

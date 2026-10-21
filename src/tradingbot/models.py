@@ -54,6 +54,8 @@ class Position:
     highest_price: float
     entry_fee: float = 0.0
     atr_at_entry: float | None = None
+    stop_order_id: str | None = None
+    exchange_stop: float | None = None
 
     def to_dict(self) -> dict:
         return asdict(self)

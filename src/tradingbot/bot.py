@@ -10,7 +10,7 @@ from pathlib import Path
 from .config import Settings
 from .data import DataFeed, timeframe_seconds
 from .exchange import Broker
-from .models import Position, Signal, Trade, utcnow_iso
+from .models import Fill, Position, Signal, Trade, utcnow_iso
 from .notify import Notifier
 from .protections import Protections
 from .risk import RiskManager
@@ -45,6 +45,7 @@ class TradingBot:
         self._stop = False
         self.protections = Protections(self.cfg.protections, timeframe_seconds(self.cfg.timeframe) * 1000)
         self.protections.load(state.protections)
+        self.strategy.import_state(state.strategy_state)
         self._save_lock = threading.Lock()
         self.last_prices: dict[str, float] = {}
         self.last_equity: float | None = None
@@ -64,6 +65,7 @@ class TradingBot:
     def _save(self) -> None:
         with self._save_lock:
             self.state.protections = self.protections.to_dict()
+            self.state.strategy_state = self.strategy.export_state()
             self.state.save(self.state_path)
 
     EQUITY_POINT_SECONDS = 300
@@ -84,6 +86,36 @@ class TradingBot:
             half = len(history) // 2
             history[:] = history[:half:2] + history[half:]
 
+    def _ai_meta(self) -> dict | None:
+        if not getattr(self.strategy, "live_only", False):
+            return None
+        ai = getattr(self.strategy, "ai", None)
+        if ai is None:
+            return None
+        return {"model": ai.model, "effort": ai.effort, "max_calls": ai.max_calls_per_day, "min_confidence": ai.min_confidence}
+
+    def _context(self, symbol: str, price: float, pos: Position | None) -> dict:
+        position = None
+        if pos is not None:
+            pnl_pct = (price / pos.entry_price - 1.0) * 100.0 if pos.entry_price else 0.0
+            position = {
+                "amount": pos.amount,
+                "entry_price": pos.entry_price,
+                "stop_loss": pos.stop_loss,
+                "take_profit": pos.take_profit,
+                "pnl_pct": pnl_pct,
+            }
+        return {
+            "symbol": symbol,
+            "price": price,
+            "position": position,
+            "equity": self.last_equity,
+            "free_quote": self.last_free_quote,
+            "quote": self.cfg.quote_currency,
+            "timeframe": self.cfg.timeframe,
+            "open_positions": len(self.state.positions),
+        }
+
     def build_snapshot(self) -> dict:
         self._snapshot = make_snapshot(
             state=self.state,
@@ -98,6 +130,7 @@ class TradingBot:
             last_cycle=self.last_cycle,
             running=self.running,
             controls=True,
+            ai_meta=self._ai_meta(),
         )
         return self._snapshot
 
@@ -194,7 +227,62 @@ class TradingBot:
 
         self.state.last_candle_ts[symbol] = last_ts
 
+    # --------------------------------------------------- Stop-Loss bei der Boerse
+    def _exchange_stops_enabled(self) -> bool:
+        return bool(self.cfg.execution.stoploss_on_exchange and self.broker.supports_exchange_stop())
+
+    def _arm_exchange_stop(self, symbol: str, pos: Position) -> None:
+        if not self._exchange_stops_enabled():
+            return
+        order_id = self.broker.place_stop(symbol, pos.amount, pos.stop_loss)
+        if order_id:
+            pos.stop_order_id, pos.exchange_stop = order_id, pos.stop_loss
+        else:
+            pos.stop_order_id = pos.exchange_stop = None
+            self.notifier.send(f"WARNUNG {symbol}: Stop-Loss konnte nicht bei der Boerse hinterlegt werden. Es gilt nur der Stop im Bot.")
+
+    def _sync_exchange_stop(self, symbol: str, pos: Position) -> bool:
+        """Prueft die hinterlegte Stop-Order. True, wenn sie ausgeloest wurde und die Position damit geschlossen ist."""
+        if not pos.stop_order_id:
+            if self._exchange_stops_enabled():
+                self._arm_exchange_stop(symbol, pos)
+            return False
+        status, fill = self.broker.stop_status(symbol, pos.stop_order_id)
+        if status == "filled" and fill is not None:
+            self._close_position(symbol, pos, "stop_loss (Boerse)", fill=fill)
+            return True
+        if status == "gone":
+            log.warning("%s: Stop-Order bei der Boerse nicht mehr vorhanden, wird neu gesetzt", symbol)
+            pos.stop_order_id = pos.exchange_stop = None
+            self._arm_exchange_stop(symbol, pos)
+        elif status == "unknown":
+            log.warning("%s: Status der Stop-Order unbekannt, der Stop im Bot bleibt aktiv", symbol)
+        return False
+
+    def _raise_exchange_stop(self, symbol: str, pos: Position) -> bool:
+        """Zieht die Stop-Order bei der Boerse nach. True, wenn sie dabei schon ausgeloest war und die Position geschlossen ist."""
+        if not pos.stop_order_id or pos.exchange_stop is None:
+            return False
+        threshold = self.cfg.execution.stoploss_replace_threshold_pct / 100.0
+        if pos.stop_loss <= pos.exchange_stop * (1.0 + threshold):
+            return False
+        result = self.broker.cancel_stop(symbol, pos.stop_order_id)
+        if result == "filled":
+            status, fill = self.broker.stop_status(symbol, pos.stop_order_id)
+            if fill is not None:
+                self._close_position(symbol, pos, "stop_loss (Boerse)", fill=fill)
+                return True
+            return False
+        if result == "failed":
+            log.warning("%s: alte Stop-Order liess sich nicht stornieren, sie bleibt bestehen", symbol)
+            return False
+        pos.stop_order_id = pos.exchange_stop = None
+        self._arm_exchange_stop(symbol, pos)
+        return False
+
     def _manage_position(self, symbol: str, pos: Position, price: float, df, is_new_candle: bool) -> None:
+        if self._sync_exchange_stop(symbol, pos):
+            return
         if price > pos.highest_price:
             pos.highest_price = price
             if self.cfg.strategy.trailing_stop:
@@ -204,6 +292,8 @@ class TradingBot:
                     if new_stop > pos.stop_loss:
                         log.info("%s: Trailing-Stop %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
                         pos.stop_loss = new_stop
+                        if self._raise_exchange_stop(symbol, pos):
+                            return
 
         if price <= pos.stop_loss:
             self._close_position(symbol, pos, "stop_loss")
@@ -212,27 +302,27 @@ class TradingBot:
             self._close_position(symbol, pos, "take_profit")
             return
         if is_new_candle:
-            decision = self.strategy.decide(df)
+            decision = self.strategy.decide(df, context=self._context(symbol, price, pos))
             if decision.signal == Signal.SELL:
                 self._close_position(symbol, pos, f"signal: {decision.reason}")
 
     def _maybe_enter(self, symbol: str, price: float, df) -> None:
-        decision = self.strategy.decide(df)
-        if decision.signal != Signal.BUY:
-            log.debug("%s: %s (%s)", symbol, decision.signal.value, decision.reason)
-            return
         if self.state.entries_paused:
-            log.info("%s: Kaufsignal ignoriert, Einstiege pausiert", symbol)
+            log.info("%s: Einstiege pausiert", symbol)
             return
         if self.state.entries_halted_for_day:
-            log.info("%s: Kaufsignal ignoriert, Tagesverlustlimit erreicht", symbol)
+            log.info("%s: Tagesverlustlimit erreicht, kein Einstieg", symbol)
             return
         allowed, why = self.protections.entry_allowed(symbol, int(time.time() * 1000))
         if not allowed:
-            log.info("%s: Kaufsignal ignoriert, %s", symbol, why)
+            log.info("%s: kein Einstieg, %s", symbol, why)
             return
         if not self.risk.can_open_new(len(self.state.positions)):
-            log.info("%s: Kaufsignal ignoriert, max. offene Positionen erreicht", symbol)
+            log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
+            return
+        decision = self.strategy.decide(df, context=self._context(symbol, price, None))
+        if decision.signal != Signal.BUY:
+            log.debug("%s: %s (%s)", symbol, decision.signal.value, decision.reason)
             return
         if decision.atr is None or decision.atr <= 0:
             return
@@ -261,6 +351,7 @@ class TradingBot:
             atr_at_entry=decision.atr,
         )
         self.state.positions[symbol] = pos
+        self._arm_exchange_stop(symbol, pos)
         self._save()
         tp_text = f"{take_profit:.4f}" if take_profit is not None else "aus"
         msg = (
@@ -269,8 +360,19 @@ class TradingBot:
         )
         self.notifier.send(msg)
 
-    def _close_position(self, symbol: str, pos: Position, reason: str) -> None:
-        fill = self.broker.sell(symbol, pos.amount)
+    def _close_position(self, symbol: str, pos: Position, reason: str, fill: Fill | None = None) -> None:
+        if fill is None and pos.stop_order_id:
+            result = self.broker.cancel_stop(symbol, pos.stop_order_id)
+            if result == "filled":
+                status, stop_fill = self.broker.stop_status(symbol, pos.stop_order_id)
+                if stop_fill is not None:
+                    fill, reason = stop_fill, "stop_loss (Boerse)"
+            elif result == "failed":
+                log.warning("%s: Stop-Order bei der Boerse liess sich nicht stornieren, der Verkauf kann scheitern", symbol)
+            if fill is None:
+                pos.stop_order_id = pos.exchange_stop = None
+        if fill is None:
+            fill = self.broker.sell(symbol, pos.amount)
         fees = fill.fee + pos.entry_fee
         pnl = (fill.price - pos.entry_price) * pos.amount - fees
         invested = pos.entry_price * pos.amount

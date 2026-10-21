@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import itertools
+import math
 import time
 from dataclasses import dataclass, field
 from datetime import datetime, timezone
@@ -14,6 +15,13 @@ from .risk import RiskManager
 from .strategy import EXIT_GRID, REGISTRY
 
 DD_FLOOR = 5.0
+METRICS = ("calmar", "sharpe", "sortino", "profit")
+METRIC_NAMES = {
+    "calmar": "Rendite im Verhaeltnis zum Drawdown (Calmar)",
+    "sharpe": "Sharpe-Ratio auf Tagesbasis",
+    "sortino": "Sortino-Ratio auf Tagesbasis",
+    "profit": "reine Rendite",
+}
 MIN_TRADES_RELIABLE = 30
 MIN_PROFIT_FACTOR = 1.2
 MIN_SHARE_POSITIVE_COINS = 0.6
@@ -75,12 +83,38 @@ def aggregate(results: list[BacktestResult]) -> Aggregate:
     )
 
 
-def selection_score(results: list[BacktestResult], min_trades: int) -> float:
-    """Auswahlkriterium, ausschliesslich auf dem Auswahlzeitraum: Rendite relativ zum Drawdown, gemittelt
-    ueber alle Coins. Zu wenige Trades gelten als nicht aussagekraeftig."""
+def _daily_returns(r: BacktestResult) -> pd.Series:
+    daily = r.equity_curve.resample("1D").last().dropna()
+    return daily.pct_change().dropna()
+
+
+def metric_value(r: BacktestResult, metric: str) -> float:
+    if metric == "profit":
+        return r.total_return_pct
+    if metric == "calmar":
+        return r.total_return_pct / max(r.max_drawdown_pct, DD_FLOOR)
+    rets = _daily_returns(r)
+    if len(rets) < 5:
+        return 0.0
+    mean = float(rets.mean())
+    if metric == "sharpe":
+        sd = float(rets.std())
+        return mean / sd * math.sqrt(365) if sd > 0 else 0.0
+    if metric == "sortino":
+        downside = rets[rets < 0]
+        dd = math.sqrt(float((downside**2).sum()) / len(rets))
+        return mean / dd * math.sqrt(365) if dd > 0 else 0.0
+    raise ValueError(f"Unbekanntes Bewertungsmass '{metric}'. Verfuegbar: {METRICS}")
+
+
+def selection_score(results: list[BacktestResult], min_trades: int, metric: str = "calmar") -> float:
+    """Auswahlkriterium, ausschliesslich auf dem Auswahlzeitraum, gemittelt ueber alle Coins.
+    Zu wenige Trades gelten als nicht aussagekraeftig."""
+    if metric not in METRICS:
+        raise ValueError(f"Unbekanntes Bewertungsmass '{metric}'. Verfuegbar: {METRICS}")
     if sum(r.n_trades for r in results) < min_trades:
         return -1e9
-    return sum(r.total_return_pct / max(r.max_drawdown_pct, DD_FLOOR) for r in results) / len(results)
+    return sum(metric_value(r, metric) for r in results) / len(results)
 
 
 @dataclass
@@ -120,6 +154,7 @@ class Comparison:
     slippage_pct: float
     start_date: str
     end_date: str
+    metric: str = "calmar"
 
     @property
     def ranking(self) -> list[StrategyOutcome]:
@@ -144,7 +179,10 @@ def run_comparison(
     min_trades: int = 10,
     progress: Callable[[str], None] | None = None,
     protections: ProtectionConfig | None = None,
+    metric: str = "calmar",
 ) -> Comparison:
+    if metric not in METRICS:
+        raise ValueError(f"Unbekanntes Bewertungsmass '{metric}'. Verfuegbar: {METRICS}")
     if not 0.2 <= split <= 0.9:
         raise ValueError("split muss zwischen 0.2 und 0.9 liegen")
     risk = RiskManager(risk_cfg)
@@ -184,7 +222,7 @@ def run_comparison(
                     is_res.append(bt.run(p, s, start=1, end=cut, prepared=True, signals=sig))
                     oos_res.append(bt.run(p, s, start=cut, end=len(p), prepared=True, signals=sig))
                 results.append(
-                    ComboResult(name, params, aggregate(is_res), aggregate(oos_res), selection_score(is_res, min_trades), is_res, oos_res)
+                    ComboResult(name, params, aggregate(is_res), aggregate(oos_res), selection_score(is_res, min_trades, metric), is_res, oos_res)
                 )
         best = max(results, key=lambda c: c.score)
         outcomes.append(StrategyOutcome(name, results, best))
@@ -212,6 +250,7 @@ def run_comparison(
         slippage_pct=paper_cfg.slippage_pct,
         start_date=date(first, 0),
         end_date=date(first, len(first) - 1),
+        metric=metric,
     )
 
 
@@ -231,7 +270,7 @@ def format_report(cmp: Comparison, synthetic: bool = False, notes: list[str] | N
         "# Strategievergleich",
         "",
         f"- **Daten:** {', '.join(cmp.symbols)}, Zeitrahmen {cmp.timeframe}, {cmp.start_date} bis {cmp.end_date}",
-        f"- **Auswahlzeitraum:** bis {next(iter(cmp.split_dates.values()))}. Hier werden die Parameter gewaehlt.",
+        f"- **Auswahlzeitraum:** bis {next(iter(cmp.split_dates.values()))}. Hier werden die Parameter gewaehlt, nach: {METRIC_NAMES[cmp.metric]}.",
         f"- **Pruefzeitraum:** danach, nie zur Auswahl benutzt. Nur dieser Zeitraum zaehlt fuer die Bewertung.",
         f"- **Kosten:** Gebuehr {cmp.fee_pct}% pro Order, Kursabweichung {cmp.slippage_pct}%",
         f"- **Buy & Hold im Pruefzeitraum:** {cmp.buy_hold_oos:+.1f}% (Vergleichswert, ohne Handel)",

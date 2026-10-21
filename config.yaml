@@ -27,7 +27,7 @@ paper:
   slippage_pct: 0.05         # angenommene Kursabweichung bei Market-Orders in Prozent
 
 strategy:
-  name: ema_cross            # ema_cross | donchian | macd_trend | rsi_reversion | bollinger_reversion
+  name: ema_cross            # ema_cross | donchian | macd_trend | rsi_reversion | bollinger_reversion | claude_advisor
   fast_ema: 20
   slow_ema: 50
   rsi_period: 14

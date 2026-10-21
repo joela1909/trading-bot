@@ -62,7 +62,7 @@ class Strategy(ABC):
         self._add_indicators(out)
         return out
 
-    def decide(self, df: pd.DataFrame, i: int = -1) -> Decision:
+    def decide(self, df: pd.DataFrame, i: int = -1, context: dict | None = None) -> Decision:
         n = len(df)
         if n < 2:
             return Decision(Signal.HOLD, "zu wenig Daten")
@@ -84,6 +84,13 @@ class Strategy(ABC):
             tp = close + self.cfg.take_profit_atr_mult * atr_value if self.cfg.take_profit_atr_mult > 0 else None
             return Decision(Signal.BUY, self.buy_reason, stop_loss=stop, take_profit=tp, atr=atr_value)
         return Decision(Signal.HOLD, "kein Signal", atr=atr_value)
+
+    def export_state(self) -> dict:
+        """Strategie-Zustand, der mit dem Bot gespeichert wird (z. B. Zaehler der KI-Aufrufe)."""
+        return {}
+
+    def import_state(self, state: dict) -> None:
+        return None
 
     def trailing_stop(self, highest_price: float, atr_value: float) -> float:
         return highest_price - self.cfg.stop_atr_mult * atr_value

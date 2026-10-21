@@ -48,6 +48,7 @@ def make_snapshot(
     last_cycle: str | None,
     running: bool,
     controls: bool,
+    ai_meta: dict | None = None,
 ) -> dict:
     history = list(state.equity_history)
     if equity is None and history:
@@ -75,12 +76,23 @@ def make_snapshot(
                 "entry_price": p.entry_price,
                 "price": price,
                 "stop_loss": p.stop_loss,
+                "stop_on_exchange": bool(p.stop_order_id),
                 "take_profit": p.take_profit,
                 "pnl_quote": pnl,
                 "pnl_pct": pnl_pct,
                 "opened_at": p.opened_at,
             }
         )
+
+    ai = None
+    ai_state = (state.strategy_state or {}).get("ai")
+    if ai_meta is not None:
+        ai_state = ai_state or {}
+        ai = {
+            **ai_meta,
+            "calls_today": ai_state.get("calls", 0),
+            "decisions": list(reversed(ai_state.get("decisions", [])[-15:])),
+        }
 
     trades = list(state.trades)
     return {
@@ -105,4 +117,5 @@ def make_snapshot(
         "trades": [t.to_dict() for t in reversed(trades[-MAX_TRADES:])],
         "stats": compute_stats(trades),
         "equity_history": downsample(history),
+        "ai": ai,
     }

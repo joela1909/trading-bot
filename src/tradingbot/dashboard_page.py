@@ -44,6 +44,15 @@ INDEX_HTML = """<!doctype html>
     <p id="positions-empty" class="empty" hidden>Keine offenen Positionen.</p>
   </section>
 
+  <section class="card" id="ai-card" hidden>
+    <div class="card-head"><h2>KI-Entscheidungen</h2><span id="ai-meta" class="muted"></span></div>
+    <div class="table-wrap"><table id="ai-table">
+      <thead><tr><th>Zeit</th><th>Paar</th><th>Entscheidung</th><th class="num">Konfidenz</th><th>Umgesetzt</th><th>Begründung</th></tr></thead>
+      <tbody></tbody>
+    </table></div>
+    <p id="ai-empty" class="empty" hidden>Noch keine Entscheidungen. Die KI wird bei jeder neuen Kerze gefragt.</p>
+  </section>
+
   <section class="card">
     <div class="card-head"><h2>Letzte Trades</h2></div>
     <div class="table-wrap"><table id="trades">
@@ -115,6 +124,7 @@ table { width: 100%; border-collapse: collapse; font-variant-numeric: tabular-nu
 th, td { text-align: left; padding: 8px 10px; border-bottom: 1px solid var(--border); white-space: nowrap; }
 th { color: var(--muted); font-weight: 550; font-size: 12px; text-transform: uppercase; letter-spacing: .04em; }
 th.num, td.num { text-align: right; }
+td.wrap { white-space: normal; min-width: 280px; max-width: 520px; }
 tbody tr:last-child td { border-bottom: 0; }
 .empty { color: var(--muted); margin: 8px 0 0; }
 .controls { display: flex; align-items: center; justify-content: space-between; gap: 16px; flex-wrap: wrap; }
@@ -256,7 +266,7 @@ APP_JS = """(function () {
       cell(tr, nf(p.amount, 6), 'num');
       cell(tr, price(p.entry_price), 'num');
       cell(tr, price(p.price), 'num');
-      cell(tr, price(p.stop_loss), 'num');
+      cell(tr, price(p.stop_loss) + (p.stop_on_exchange ? ' (Börse)' : ''), 'num');
       cell(tr, p.take_profit === null ? '–' : price(p.take_profit), 'num');
       cell(tr, p.pnl_quote === null ? '–' : signed(p.pnl_quote, 2) + ' (' + signed(p.pnl_pct, 2, ' %') + ')', 'num ' + cls(p.pnl_quote));
       cell(tr, when(p.opened_at));
@@ -284,6 +294,28 @@ APP_JS = """(function () {
     $('trades').hidden = s.trades.length === 0;
   }
 
+  function renderAi(s) {
+    var card = $('ai-card');
+    card.hidden = !s.ai;
+    if (!s.ai) return;
+    $('ai-meta').textContent = s.ai.model + ' · Aufrufe heute ' + s.ai.calls_today + ' von ' + s.ai.max_calls;
+    var body = document.querySelector('#ai-table tbody');
+    body.textContent = '';
+    var names = { buy: 'Kaufen', sell: 'Verkaufen', hold: 'Halten' };
+    s.ai.decisions.forEach(function (d) {
+      var tr = document.createElement('tr');
+      cell(tr, when(d.ts));
+      cell(tr, d.symbol);
+      cell(tr, names[d.action] || d.action);
+      cell(tr, nf(d.confidence * 100, 0) + ' %', 'num');
+      cell(tr, d.applied ? 'ja' : 'nein');
+      cell(tr, d.reason, 'wrap');
+      body.appendChild(tr);
+    });
+    $('ai-empty').hidden = s.ai.decisions.length > 0;
+    $('ai-table').hidden = s.ai.decisions.length === 0;
+  }
+
   function renderControls(s) {
     var box = $('controls');
     box.hidden = !s.controls || !s.running;
@@ -294,7 +326,7 @@ APP_JS = """(function () {
 
   function render(s) {
     snap = s;
-    renderHeader(s); renderKpis(s); renderChart(s); renderPositions(s); renderTrades(s); renderControls(s);
+    renderHeader(s); renderKpis(s); renderChart(s); renderPositions(s); renderAi(s); renderTrades(s); renderControls(s);
   }
 
   function load() {

@@ -8,6 +8,7 @@ from pydantic import BaseModel, ConfigDict, Field, field_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["paper", "live"]
+PASSPHRASE_EXCHANGES = ("bitget", "okx", "kucoin", "coinbase", "coinbaseadvanced", "bitmart", "cryptocom")
 
 
 class PaperConfig(BaseModel):
@@ -64,6 +65,17 @@ class ExecutionConfig(BaseModel):
     stoploss_replace_threshold_pct: float = Field(default=0.25, ge=0)
 
 
+class AiConfig(BaseModel):
+    model: str = "claude-opus-5-5"
+    effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
+    min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    min_confidence_exit: float = Field(default=0.5, ge=0.0, le=1.0)
+    max_calls_per_day: int = Field(default=200, ge=1)
+    candles_in_prompt: int = Field(default=48, ge=10, le=300)
+    timeout_seconds: float = Field(default=90.0, ge=5.0)
+    max_tokens: int = Field(default=16000, ge=2000)
+
+
 class DashboardConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=8765, ge=0, le=65535)
@@ -85,6 +97,7 @@ class BotConfig(BaseModel):
     dashboard: DashboardConfig = Field(default_factory=DashboardConfig)
     protections: ProtectionConfig = Field(default_factory=ProtectionConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
+    ai: AiConfig = Field(default_factory=AiConfig)
 
     @field_validator("symbols")
     @classmethod
@@ -102,6 +115,7 @@ class Secrets(BaseSettings):
     exchange_api_key: str = ""
     exchange_api_secret: str = ""
     exchange_api_password: str = ""
+    anthropic_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
 
@@ -123,6 +137,10 @@ class Settings(BaseModel):
                 )
             if not self.secrets.exchange_api_key or not self.secrets.exchange_api_secret:
                 raise RuntimeError("Live-Modus: EXCHANGE_API_KEY und EXCHANGE_API_SECRET fehlen in .env")
+            if self.bot.exchange in PASSPHRASE_EXCHANGES and not self.secrets.exchange_api_password:
+                raise RuntimeError(f"{self.bot.exchange} verlangt zusaetzlich eine Passphrase: EXCHANGE_API_PASSWORD fehlt in .env")
+        if self.bot.strategy.name == "claude_advisor" and not self.secrets.anthropic_api_key:
+            raise RuntimeError("Die Strategie claude_advisor braucht ANTHROPIC_API_KEY in .env (Zugang zur Anthropic-API).")
         for symbol in self.bot.symbols:
             if "/" not in symbol or symbol.split("/")[1] != self.bot.quote_currency:
                 raise RuntimeError(

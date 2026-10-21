@@ -19,6 +19,11 @@ und begrenzt das Risiko pro Trade und pro Tag.
 - **Fünf Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop:
   `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
   `rsi_reversion` und `bollinger_reversion` (Rückkehr zum Mittelwert). Gewählt wird in `config.yaml` unter `strategy.name`.
+- **KI-Bot** (`claude_advisor`): Claude entscheidet bei jeder neuen Kerze über Einstieg und Ausstieg. Positionsgröße,
+  Stop-Loss und alle Risikogrenzen bleiben fest im Bot. Läuft getestet auf Bitget, siehe Abschnitt „KI-Bot für Bitget“.
+- **Schutzmechanismen:** Abkühlphase nach Ausstiegen, Sperre nach Stop-Loss-Serien und eine Drawdown-Grenze,
+  im Bot und im Backtest identisch.
+- **Stop-Loss bei der Börse** (optional): Der Stop liegt als Order bei der Börse und schützt auch, wenn der Bot oder der PC ausfällt.
 - **Strategievergleich** (`tradingbot compare`): testet alle Strategien mit vielen Parametern auf mehreren Coins
   und prüft die Gewinner auf einem Zeitraum, der bei der Auswahl nie benutzt wurde.
 - **Risikomanagement**: Positionsgröße nach festem Risiko pro Trade, maximale Positionsgröße,
@@ -41,6 +46,7 @@ Voraussetzung ist Python 3.11 oder neuer. Bei der Installation von Python unter 
 | Einmal installieren | `install.bat` | `./install.sh` |
 | Beste Strategie finden | `vergleich.bat` | `./vergleich.sh` |
 | Bot starten, Papierhandel | `start.bat` | `./start.sh` |
+| KI-Bot für Bitget starten | `start-ki.bat` | `./start-ki.sh` |
 
 `start.bat` öffnet das Dashboard automatisch im Browser. Beenden mit Strg+C. Der Rechner darf dabei nicht in
 den Ruhemodus gehen. Die Windows-Dateien sind nicht auf einem echten Windows-System getestet, die Mac/Linux-Skripte schon.
@@ -130,6 +136,94 @@ tradingbot backtest --symbol BTC/USDT --csv daten/btc_1h.csv --export trades.csv
 
 Die Strategie-Parameter kommen aus `config.yaml`. Ein Backtest ersetzt keinen
 Papierhandel über mehrere Wochen: er kennt weder Orderbuch noch echte Latenz.
+
+## KI-Bot für Bitget
+
+Hier entscheidet Claude, ob der Bot kauft, verkauft oder wartet. Der Bot schickt der KI bei jeder neuen Kerze die
+letzten Kerzen, die Indikatoren, die Position und das Kapital. Die KI antwortet mit Kaufen, Verkaufen oder Halten,
+einer Sicherheit zwischen 0 und 1 und einer kurzen Begründung. Alles Weitere bleibt im Bot:
+
+- **Positionsgröße und Stop-Loss** berechnet der Bot nach festen Regeln, nicht die KI.
+- **Schutzregeln** gelten unverändert: Tagesverlustlimit, maximale Positionen, Abkühlphase, Drawdown-Grenze, Pause-Schalter.
+- **Fehler führen zu Halten:** Bei Netzwerkfehler, Zeitüberschreitung, Ablehnung, abgeschnittener oder unlesbarer Antwort kauft
+  der Bot nichts. Offene Positionen bleiben durch ihre Stops geschützt.
+- **Mindest-Sicherheit:** Käufe unter 0,6 und Verkäufe unter 0,5 werden verworfen. Beides ist einstellbar.
+- **Kostendeckel:** Höchstens 200 KI-Aufrufe pro Tag. Gefragt wird nur bei einer neuen abgeschlossenen Kerze, nie bei jedem Durchlauf.
+  Vorher werden alle kostenlosen Prüfungen erledigt, also Pause, Tageslimit, Abkühlphase und maximale Positionen.
+- **Nachvollziehbar:** Das Dashboard zeigt jede Entscheidung mit Zeit, Sicherheit, ob sie umgesetzt wurde, und der Begründung.
+
+### Einrichten
+
+1. Auf https://console.anthropic.com einen API-Schlüssel anlegen. Er ist getrennt von einem Claude-Abo und wird nach Verbrauch abgerechnet.
+2. In der `.env` eintragen: `ANTHROPIC_API_KEY=...`
+3. Starten, zuerst immer im Papierhandel:
+   ```
+   tradingbot --config config.bitget-ki.yaml run
+   ```
+   Per Doppelklick geht es mit `start-ki.bat` bzw. `./start-ki.sh`.
+
+Der Papierhandel braucht für Bitget keinen Börsen-Schlüssel, nur den Anthropic-Schlüssel.
+
+### Kosten
+
+Standardmodell ist `claude-opus-5-5`. Eine Entscheidung braucht etwa 2000 bis 3000 Eingabe-Tokens plus die Denk- und Antwort-Tokens.
+Bei zwei Paaren und Stundenkerzen sind das 48 Aufrufe am Tag. Das ergibt grob wenige Dollar pro Tag, je nach Aufwand
+der KI. Günstiger sind `claude-sonnet-5-5` und `claude-haiku-5-5`, einstellbar unter `ai.model` in der Konfiguration.
+`ai.effort` steuert, wie gründlich die KI nachdenkt. Beobachte die Kosten in der Anthropic-Konsole und senke bei Bedarf `max_calls_per_day`.
+
+### Live-Handel auf Bitget
+
+1. Bei Bitget einen API-Schlüssel anlegen. Rechte: Lesen und Spot-Handel, **keine** Auszahlung. Wenn möglich auf deine IP beschränken.
+   Bitget verlangt dabei eine **Passphrase**, die du selbst festlegst.
+2. In `.env`: `TRADING_MODE=live`, `LIVE_TRADING_CONFIRMED=true`, `EXCHANGE_API_KEY`, `EXCHANGE_API_SECRET` und `EXCHANGE_API_PASSWORD` (die Passphrase).
+3. Zuerst `tradingbot --config config.bitget-ki.yaml run --once` und prüfen, dass Guthaben und Bestände stimmen.
+4. Mit einem sehr kleinen Betrag beginnen.
+
+Für Bitget sind Besonderheiten eingebaut: Market-Käufe geben den Preis mit, weil Bitget ihn zur Kostenberechnung verlangt. Gebühren in
+der gekauften Währung verringern die Positionsgröße, und beim Verkauf wird nie mehr als der freie Bestand angeboten.
+Die Live-Anbindung ist gegen eine simulierte Börse getestet, nicht gegen die echte Bitget-Schnittstelle.
+
+### Ehrlich zur KI
+
+Es gibt keinen Beleg, dass ein Sprachmodell am Markt dauerhaft Gewinn macht. Die Antworten sind nicht reproduzierbar.
+Ein Backtest ist nicht möglich, weil das Modell die Vergangenheit teilweise aus dem Training kennt und alte Daten scheinbar perfekt handeln würde.
+Bewerten kannst du die KI nur im Papierhandel über mehrere Wochen, am besten im Vergleich zur besten regelbasierten Strategie aus `tradingbot compare`.
+
+## Stop-Loss bei der Börse
+
+Standardmäßig überwacht nur der Bot die Stops und verkauft per Market-Order. Fällt der Bot oder der PC aus, schützt dich dann nichts.
+Mit der folgenden Einstellung hinterlegt der Bot zu jeder Position eine Stop-Order bei der Börse:
+
+```yaml
+execution:
+  stoploss_on_exchange: true
+```
+
+Der Bot zieht die Order beim Trailing-Stop nach, storniert sie vor jedem anderen Ausstieg und erkennt, wenn sie ausgelöst wurde.
+Klappt das Hinterlegen nicht, meldet der Bot eine Warnung und der Stop im Bot gilt weiter. Das ist im Live-Betrieb empfohlen,
+aber nur gegen eine simulierte Börse getestet. Probiere es zuerst mit einem sehr kleinen Betrag.
+
+## Prüfung auf Blick in die Zukunft
+
+```bash
+tradingbot check --since 2023-01-01
+```
+
+Der Befehl prüft jede Strategie auf zwei Fehlerquellen, die Backtests unbemerkt verfälschen: Signale, die sich ändern, wenn spätere Kerzen
+dazukommen, und Abweichungen zwischen dem Backtest und dem Live-Bot, der nur die letzten Kerzen sieht. `tradingbot compare` führt die Prüfung
+automatisch aus und schließt auffällige Strategien aus.
+
+## Schutzmechanismen
+
+In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.
+
+| Einstellung | Wirkung |
+|---|---|
+| `cooldown_candles` | Nach einem Ausstieg wird dasselbe Paar einige Kerzen lang nicht gekauft |
+| `stoploss_guard_stops`, `_window_candles`, `_lock_candles` | Mehrere Stop-Losses in kurzer Zeit sperren alle Einstiege für eine Weile |
+| `max_drawdown_pct`, `max_drawdown_lock_candles` | Fällt das Kapital zu weit unter sein Hoch, sperrt der Bot alle Einstiege |
+
+Im Vergleich lässt sich das mit `--no-protections` abschalten. Außerdem wählt `--metric calmar|sharpe|sortino|profit` das Maß für die Parameterwahl.
 
 ## Beste Strategie finden
 
@@ -230,6 +324,9 @@ src/tradingbot/
 ├── bot.py            Handelsschleife, Positionsverwaltung, Tagesverlustlimit
 ├── backtest.py       Backtester mit Kennzahlen, auch für Teilzeiträume
 ├── research.py       Strategievergleich mit Auswahl- und Prüfzeitraum
+├── analysis.py       Prüfung auf Blick in die Zukunft und Live-Abweichung
+├── ai.py             Anbindung an Claude für den KI-Bot
+├── protections.py    Abkühlphase, Stop-Loss-Serie, Drawdown-Grenze
 ├── synthetic.py      Künstliche Kursreihen zum Testen des Werkzeugs
 ├── dashboard.py      Lokaler Webserver (nur Loopback) für das Dashboard
 ├── dashboard_page.py HTML, CSS und JavaScript des Dashboards
