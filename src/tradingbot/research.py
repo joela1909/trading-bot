@@ -10,7 +10,7 @@ from typing import Callable
 import pandas as pd
 
 from .backtest import Backtester, BacktestResult
-from .config import PaperConfig, ProtectionConfig, RiskConfig, StrategyConfig
+from .config import DaytradingConfig, PaperConfig, ProtectionConfig, RiskConfig, StrategyConfig
 from .risk import RiskManager
 from .strategy import EXIT_GRID, REGISTRY
 
@@ -155,6 +155,9 @@ class Comparison:
     start_date: str
     end_date: str
     metric: str = "calmar"
+    daytrading: DaytradingConfig | None = None
+    allow_short: bool = False
+    leverage: float = 1.0
 
     @property
     def ranking(self) -> list[StrategyOutcome]:
@@ -180,7 +183,11 @@ def run_comparison(
     progress: Callable[[str], None] | None = None,
     protections: ProtectionConfig | None = None,
     metric: str = "calmar",
+    daytrading: DaytradingConfig | None = None,
+    leverage: float = 1.0,
 ) -> Comparison:
+    if daytrading is not None and not daytrading.enabled:
+        daytrading = None
     if metric not in METRICS:
         raise ValueError(f"Unbekanntes Bewertungsmass '{metric}'. Verfuegbar: {METRICS}")
     if not 0.2 <= split <= 0.9:
@@ -203,18 +210,18 @@ def run_comparison(
         for ind_key, variants in groups.items():
             ind_params = dict(ind_key)
             first_cfg = base_cfg.model_copy(update={"name": name, **ind_params})
-            first_strategy = REGISTRY[name](first_cfg)
+            first_strategy = REGISTRY[name](first_cfg, daytrading, timeframe)
             prepared = {}
             for s, df in data.items():
                 if len(df) < first_strategy.warmup_bars + 50:
                     raise ValueError(f"{s}: zu wenig Kerzen ({len(df)}) fuer {name}")
                 p = first_strategy.prepare(df)
-                prepared[s] = (p, first_strategy.signals(p))
+                prepared[s] = (p, first_strategy.all_signals(p))
 
             for params in variants:
                 cfg = base_cfg.model_copy(update={"name": name, **params})
-                strategy = REGISTRY[name](cfg)
-                bt = Backtester(strategy, risk, cfg, paper_cfg, protections_cfg=protections)
+                strategy = REGISTRY[name](cfg, daytrading, timeframe)
+                bt = Backtester(strategy, risk, cfg, paper_cfg, protections_cfg=protections, daytrading=daytrading, leverage=leverage)
                 is_res, oos_res = [], []
                 for s in symbols:
                     p, sig = prepared[s]
@@ -251,6 +258,20 @@ def run_comparison(
         start_date=date(first, 0),
         end_date=date(first, len(first) - 1),
         metric=metric,
+        daytrading=daytrading,
+        allow_short=base_cfg.allow_short,
+        leverage=leverage,
+    )
+
+
+def _daytrading_line(dt: DaytradingConfig | None) -> str:
+    if dt is None:
+        return "- **Tageshandel:** aus, Positionen duerfen ueber Nacht laufen"
+    limit = f"max. {dt.max_trades_per_day} Einstiege/Tag" if dt.max_trades_per_day else "Einstiege/Tag unbegrenzt"
+    hold = f", max. Haltedauer {dt.max_hold_minutes} min" if dt.max_hold_minutes else ""
+    return (
+        f"- **Tageshandel:** Einstiege {dt.entry_start}-{dt.entry_end}, alle Positionen zu ab {dt.flat_time} "
+        f"({dt.timezone}), {limit}{hold}, Tagesverlustlimit aktiv. Keine Position ueber Nacht."
     )
 
 
@@ -273,6 +294,8 @@ def format_report(cmp: Comparison, synthetic: bool = False, notes: list[str] | N
         f"- **Auswahlzeitraum:** bis {next(iter(cmp.split_dates.values()))}. Hier werden die Parameter gewaehlt, nach: {METRIC_NAMES[cmp.metric]}.",
         f"- **Pruefzeitraum:** danach, nie zur Auswahl benutzt. Nur dieser Zeitraum zaehlt fuer die Bewertung.",
         f"- **Kosten:** Gebuehr {cmp.fee_pct}% pro Order, Kursabweichung {cmp.slippage_pct}%",
+        _daytrading_line(cmp.daytrading),
+        f"- **Richtung:** Long und Short (Futures, Hebel {cmp.leverage:g})" if cmp.allow_short else "- **Richtung:** nur Long",
         f"- **Buy & Hold im Pruefzeitraum:** {cmp.buy_hold_oos:+.1f}% (Vergleichswert, ohne Handel)",
         "",
         "## Rangliste nach Rendite im Pruefzeitraum",

@@ -13,6 +13,8 @@ class EmaCrossStrategy(Strategy):
     name = "ema_cross"
     buy_reason = "EMA-Kreuz nach oben"
     sell_reason = "EMA-Kreuz nach unten"
+    short_reason = "EMA-Kreuz nach unten"
+    cover_reason = "EMA-Kreuz nach oben"
     param_grid = {"fast_ema": [10, 20, 30], "slow_ema": [50, 100, 200]}
 
     @classmethod
@@ -33,3 +35,10 @@ class EmaCrossStrategy(Strategy):
         down = cross_down(df["ema_fast"], df["ema_slow"])
         buy = up & (df["rsi"] < self.cfg.rsi_max_entry).to_numpy() & (df["atr"] > 0).to_numpy()
         return buy, down
+
+    def short_signals(self, df):
+        up = cross_up(df["ema_fast"], df["ema_slow"])
+        down = cross_down(df["ema_fast"], df["ema_slow"])
+        # gespiegelter RSI-Filter: kein Short, wenn der Markt bereits ueberverkauft ist
+        short = down & (df["rsi"] > 100.0 - self.cfg.rsi_max_entry).to_numpy() & (df["atr"] > 0).to_numpy()
+        return short, up

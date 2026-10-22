@@ -1,8 +1,8 @@
 # Trading Bot
 
-Vollautomatischer Krypto-Trading-Bot für den Spot-Handel (long-only) auf Basis von
-[ccxt](https://github.com/ccxt/ccxt). Läuft rund um die Uhr, handelt nach einer
-Trendfolge-Strategie, verwaltet Stop-Loss, Take-Profit und Trailing-Stop selbst
+Vollautomatischer Krypto-Trading-Bot auf Basis von [ccxt](https://github.com/ccxt/ccxt), für Spot (nur Long)
+oder USDT-Futures (**Long und Short**), spezialisiert auf **Tageshandel (Daytrading)**: Einstiege nur in einem
+festen Zeitfenster, alle Positionen werden vor Feierabend geschlossen, nichts läuft über Nacht. Der Bot verwaltet Stop-Loss, Take-Profit und Trailing-Stop selbst
 und begrenzt das Risiko pro Trade und pro Tag.
 
 > **Wichtig:** Krypto-Handel kann zum Totalverlust führen. Kein Bot und keine
@@ -16,8 +16,14 @@ und begrenzt das Risiko pro Trade und pro Tag.
 - **Papierhandel** (Standard): Simulation mit echten Live-Kursen, Gebühren und Slippage, ohne API-Key.
 - **Live-Handel**: echte Market-Orders über ccxt (Binance, Kraken, Bybit, OKX, Coinbase, Bitget, ...).
   Muss doppelt freigeschaltet werden (`TRADING_MODE=live` und `LIVE_TRADING_CONFIRMED=true`).
-- **Fünf Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop:
-  `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
+- **Tageshandel** (Standard, Abschnitt `daytrading` in der Konfiguration): Einstiegsfenster (z. B. 08:00–21:30),
+  Zwangsschließung aller Positionen ab `flat_time` (z. B. 22:00), max. Einstiege pro Tag, optionale max. Haltedauer.
+  Uhrzeiten in deiner Zeitzone inkl. Sommerzeit. Gilt auch für den KI-Bot. Backtest und Vergleich nutzen dieselben Regeln.
+- **Short-Positionen** über USDT-Perpetual-Futures (`market: futures`, `strategy.allow_short: true`), Hebel einstellbar,
+  Standard 1. Alle Strategien haben gespiegelte Short-Signale. Futures laufen bisher nur im Papierhandel.
+- **Sieben Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop.
+  Für den Tageshandel: `vwap_reversion` (Kauf deutlich unter dem Tages-VWAP, Verkauf am VWAP) und
+  `opening_range` (Ausbruch über die Eröffnungsspanne ab `entry_start`). Außerdem `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
   `rsi_reversion` und `bollinger_reversion` (Rückkehr zum Mittelwert). Gewählt wird in `config.yaml` unter `strategy.name`.
 - **KI-Bot** (`claude_advisor`): Claude entscheidet bei jeder neuen Kerze über Einstieg und Ausstieg. Positionsgröße,
   Stop-Loss und alle Risikogrenzen bleiben fest im Bot. Läuft getestet auf Bitget, siehe Abschnitt „KI-Bot für Bitget“.
@@ -266,6 +272,68 @@ daraus sagen nichts über echte Märkte.
 Grenzen: Ein Backtest kennt keine Orderbuchtiefe, keine Latenz und keine Handelsausfälle. Ein einzelner
 Prüfzeitraum ist keine Garantie. Teste einen Gewinner anschließend mehrere Wochen im Papierhandel.
 
+## Short-Positionen (Futures)
+
+Im Spot-Handel kann man nur kaufen, was man hat. Für Shorts handelt der Bot USDT-Perpetual-Futures:
+
+```yaml
+market: futures            # spot | futures
+symbols: [BTC/USDT, ETH/USDT, SOL/USDT]   # wird automatisch zu BTC/USDT:USDT usw.
+futures:
+  leverage: 1              # 1 = kein zusätzliches Risiko durch Hebel
+  margin_mode: isolated
+strategy:
+  allow_short: true
+paper:
+  fee_pct: 0.05            # Futures-Gebühren sind niedriger als Spot
+```
+
+- **Signale:** Jede Strategie hat gespiegelte Short-Regeln, z. B. `vwap_reversion` shortet, wenn der Kurs mehrere ATR
+  **über** dem Tages-VWAP liegt, und schließt am VWAP. Trendfilter: Long nur über, Short nur unter `trend_ema`.
+- **Stop-Loss** liegt bei Short über dem Einstieg, Take-Profit darunter. Der Trailing-Stop zieht bei fallenden Kursen nach unten nach.
+- **Konto:** Eine Position bindet Nennwert / Hebel als Sicherheit. Gebühren fallen auf den Nennwert an.
+- **Grenzen:** Funding-Gebühren und Liquidation werden im Papierhandel und Backtest nicht simuliert. Bei Hebel 1
+  liegt die Liquidation weit hinter dem Stop. **Live-Handel mit Futures ist gesperrt**, bis die Anbindung gegen
+  eine echte Börse getestet ist. Der KI-Bot (`claude_advisor`) kann noch nicht shorten.
+- Futures haben einen eigenen Zustand (`state/state_paper_futures.json`), Spot-Positionen werden nicht vermischt.
+- Prüfe vorher, ob dein Wohnsitzland Krypto-Derivate bei deiner Börse überhaupt erlaubt.
+
+## Tageshandel
+
+Standardmäßig handelt der Bot nur innerhalb eines Tages, in `config.yaml` auf 1-Minuten-Kerzen, im KI-Bot auf 15-Minuten-Kerzen:
+
+```yaml
+timeframe: 1m
+daytrading:
+  enabled: true
+  timezone: Europe/Berlin
+  entry_start: "08:00"       # ab hier neue Einstiege, Beginn der Eröffnungsspanne
+  entry_end: "21:30"         # danach keine neuen Einstiege
+  flat_time: "22:00"         # ab hier werden alle offenen Positionen verkauft
+  max_trades_per_day: 6      # über alle Coins, 0 = unbegrenzt
+  max_hold_minutes: 0        # 0 = nur durch flat_time begrenzt
+```
+
+- Eine Position, die noch vom Vortag stammt (z. B. weil der Rechner zur `flat_time` aus war), wird beim nächsten
+  Durchlauf sofort geschlossen.
+- Der Handelstag für das Tagesverlustlimit beginnt um Mitternacht in der eingestellten Zeitzone.
+- Krypto wird rund um die Uhr gehandelt. Das Zeitfenster ist deshalb deine Wahl, nicht die der Börse.
+- Die Zeitprüfung kommt vor der Strategie: Außerhalb des Fensters fragt der KI-Bot Claude nicht nach Einstiegen,
+  das spart Aufrufe. Bei 15-Minuten-Kerzen und zwei Paaren sind es höchstens rund 110 Aufrufe am Tag statt 48 bei 1h.
+- `enabled: false` schaltet zurück auf den Modus mit Positionen über Nacht (dann z. B. `timeframe: 1h`).
+- Mit `--no-daytrading` testen `backtest`, `check` und `compare` ohne diese Regeln.
+
+Strategievergleich für den Tageshandel:
+
+```bash
+tradingbot compare --symbols BTC/USDT,ETH/USDT,SOL/USDT --timeframe 15m --since 2023-01-01
+```
+
+**Gebühren sind beim Tageshandel der größte Gegner.** Bei 0,1 % pro Order kostet jeder Trade hin und zurück
+rund 0,3 % inklusive Kursabweichung. Auf 15-Minuten-Kerzen ist ein typischer Stop nur wenige Zehntel Prozent
+entfernt, die Kosten fressen also einen großen Teil jedes Gewinns. Trage deine echten Gebühren in `paper.fee_pct` ein,
+damit Backtest und Papierhandel realistisch rechnen.
+
 ## Konfiguration
 
 Alle Parameter stehen kommentiert in [`config.yaml`](config.yaml). Die wichtigsten:
@@ -278,6 +346,8 @@ Alle Parameter stehen kommentiert in [`config.yaml`](config.yaml). Die wichtigst
 | `risk` | `risk_per_trade_pct` | Max. Verlust pro Trade in Prozent des Kapitals |
 | `risk` | `max_position_pct`, `max_open_positions` | Begrenzung der Positionsgröße und -anzahl |
 | `risk` | `max_daily_loss_pct` | Ab diesem Tagesverlust keine neuen Einstiege bis zum nächsten Tag |
+| `daytrading` | `entry_start`, `entry_end`, `flat_time`, `timezone` | Einstiegsfenster und Zwangsschließung (siehe Tageshandel) |
+| `daytrading` | `max_trades_per_day`, `max_hold_minutes` | Max. Einstiege pro Tag, max. Haltedauer |
 | `paper` | `starting_balance`, `fee_pct`, `slippage_pct` | Simulationsparameter |
 
 Geheimnisse (API-Keys, Telegram-Token) gehören ausschließlich in `.env`, niemals in `config.yaml`.
@@ -333,6 +403,7 @@ pytest
 src/tradingbot/
 ├── cli.py            Kommandozeile: run, backtest, status
 ├── bot.py            Handelsschleife, Positionsverwaltung, Tagesverlustlimit
+├── session.py        Handelszeiten für den Tageshandel (Bot und Backtest)
 ├── backtest.py       Backtester mit Kennzahlen, auch für Teilzeiträume
 ├── research.py       Strategievergleich mit Auswahl- und Prüfzeitraum
 ├── analysis.py       Prüfung auf Blick in die Zukunft und Live-Abweichung
@@ -345,12 +416,12 @@ src/tradingbot/
 ├── snapshot.py       Datenstand für das Dashboard (Kennzahlen, Positionen, Verlauf)
 ├── config.py         config.yaml + .env (pydantic)
 ├── data.py           Marktdaten über ccxt, CSV-Import
-├── exchange.py       PaperBroker (Simulation) und LiveBroker (ccxt)
-├── indicators.py     EMA, RSI, ATR
+├── exchange.py       PaperBroker (Spot), PaperFuturesBroker (Long/Short) und LiveBroker (ccxt, Spot)
+├── indicators.py     EMA, RSI, ATR, MACD, Tages-VWAP
 ├── risk.py           Positionsgröße, Limits
 ├── state.py          Persistenter Zustand
 ├── notify.py         Log- und Telegram-Benachrichtigungen
-└── strategy/         Strategie-Schnittstelle und die fünf Strategien
+└── strategy/         Strategie-Schnittstelle, sieben Strategien und die KI-Strategie
 ```
 
 ## Lizenz

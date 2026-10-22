@@ -38,7 +38,7 @@ INDEX_HTML = """<!doctype html>
   <section class="card">
     <div class="card-head"><h2>Offene Positionen</h2></div>
     <div class="table-wrap"><table id="positions">
-      <thead><tr><th>Paar</th><th class="num">Menge</th><th class="num">Einstieg</th><th class="num">Aktuell</th><th class="num">Stop-Loss</th><th class="num">Take-Profit</th><th class="num">G/V</th><th>Seit</th></tr></thead>
+      <thead><tr><th>Paar</th><th>Richtung</th><th class="num">Menge</th><th class="num">Größe</th><th class="num">Risiko bis Stop</th><th class="num">Einstieg</th><th class="num">Aktuell</th><th class="num">Stop-Loss</th><th class="num">Take-Profit</th><th class="num">G/V</th><th>Seit</th></tr></thead>
       <tbody></tbody>
     </table></div>
     <p id="positions-empty" class="empty" hidden>Keine offenen Positionen.</p>
@@ -56,7 +56,7 @@ INDEX_HTML = """<!doctype html>
   <section class="card">
     <div class="card-head"><h2>Letzte Trades</h2></div>
     <div class="table-wrap"><table id="trades">
-      <thead><tr><th>Geschlossen</th><th>Paar</th><th class="num">Einstieg</th><th class="num">Ausstieg</th><th class="num">G/V</th><th class="num">%</th><th>Grund</th></tr></thead>
+      <thead><tr><th>Geschlossen</th><th>Paar</th><th>Richtung</th><th class="num">Größe</th><th class="num">Einstieg</th><th class="num">Ausstieg</th><th class="num">G/V</th><th class="num">%</th><th>Grund</th></tr></thead>
       <tbody></tbody>
     </table></div>
     <p id="trades-empty" class="empty" hidden>Noch keine abgeschlossenen Trades.</p>
@@ -177,9 +177,13 @@ APP_JS = """(function () {
   function cell(tr, text, cssClass) { tr.appendChild(el('td', cssClass || '', text)); }
 
   function reasonText(r) {
-    var map = { stop_loss: 'Stop-Loss', take_profit: 'Take-Profit', end_of_data: 'Ende der Daten' };
+    var map = { stop_loss: 'Stop-Loss', take_profit: 'Take-Profit', end_of_data: 'Ende der Daten', session_end: 'Handelsschluss', max_hold: 'Max. Haltedauer' };
     if (map[r]) return map[r];
     return r.indexOf('signal:') === 0 ? 'Signal:' + r.slice(7) : r;
+  }
+
+  function sideText(side) {
+    return side === 'short' ? 'Short' : 'Long';
   }
 
   function renderHeader(s) {
@@ -263,7 +267,11 @@ APP_JS = """(function () {
     s.positions.forEach(function (p) {
       var tr = document.createElement('tr');
       cell(tr, p.symbol);
+      cell(tr, sideText(p.side));
       cell(tr, nf(p.amount, 6), 'num');
+      cell(tr, nf(p.notional, 2) + ' ' + s.quote + (p.size_pct === null ? '' : ' (' + nf(p.size_pct, 1) + ' %)')
+        + (p.leverage > 1 ? ' · Hebel ' + nf(p.leverage, 0) + ', Sicherheit ' + nf(p.margin, 2) : ''), 'num');
+      cell(tr, nf(p.risk_quote, 2) + ' ' + s.quote + (p.risk_pct === null ? '' : ' (' + nf(p.risk_pct, 2) + ' %)'), 'num');
       cell(tr, price(p.entry_price), 'num');
       cell(tr, price(p.price), 'num');
       cell(tr, price(p.stop_loss) + (p.stop_on_exchange ? ' (Börse)' : ''), 'num');
@@ -283,6 +291,8 @@ APP_JS = """(function () {
       var tr = document.createElement('tr');
       cell(tr, when(t.closed_at));
       cell(tr, t.symbol);
+      cell(tr, sideText(t.side));
+      cell(tr, nf(t.amount * t.entry_price, 2) + ' ' + s.quote + ' (' + nf(t.amount, 6) + ')', 'num');
       cell(tr, price(t.entry_price), 'num');
       cell(tr, price(t.exit_price), 'num');
       cell(tr, signed(t.pnl_quote, 2), 'num ' + cls(t.pnl_quote));

@@ -13,6 +13,8 @@ class BollingerReversionStrategy(Strategy):
     name = "bollinger_reversion"
     buy_reason = "Kurs unter dem unteren Bollinger-Band"
     sell_reason = "Kurs an der Mittellinie"
+    short_reason = "Kurs ueber dem oberen Bollinger-Band"
+    cover_reason = "Kurs an der Mittellinie"
     param_grid = {"bb_period": [20, 40], "bb_std": [2.0, 2.5], "trend_ema": [0, 200]}
 
     @property
@@ -25,6 +27,7 @@ class BollingerReversionStrategy(Strategy):
         sd = df["close"].rolling(period, min_periods=period).std(ddof=0)
         df["bb_mid"] = mid
         df["bb_lower"] = mid - self.p("bb_std", 2.0) * sd
+        df["bb_upper"] = mid + self.p("bb_std", 2.0) * sd
         trend = self.p("trend_ema", 0)
         if trend > 0:
             df["ema_trend"] = ema(df["close"], trend)
@@ -35,3 +38,10 @@ class BollingerReversionStrategy(Strategy):
             buy = buy & (df["close"] > df["ema_trend"]).to_numpy()
         sell = (df["close"] > df["bb_mid"]).to_numpy()
         return buy, sell
+
+    def short_signals(self, df):
+        short = (df["close"] > df["bb_upper"]).to_numpy() & (df["atr"] > 0).to_numpy()
+        if self.p("trend_ema", 0) > 0:
+            short = short & (df["close"] < df["ema_trend"]).to_numpy()
+        cover = (df["close"] < df["bb_mid"]).to_numpy()
+        return short, cover

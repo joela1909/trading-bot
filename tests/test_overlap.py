@@ -53,7 +53,7 @@ def test_combine_sums_bars_and_counts():
 def test_report_text_and_protections_flag():
     r = _run(REGISTRY, protections=ProtectionConfig())
     text = format_overlap(r, synthetic=True)
-    assert "SYNTHETISCHE DATEN" in text and "Alle 5" in text and "Paarvergleich" in text
+    assert "SYNTHETISCHE DATEN" in text and f"Alle {len(REGISTRY)}" in text and "Paarvergleich" in text
     assert "SYNTHETISCHE DATEN" not in format_overlap(r)
 
 

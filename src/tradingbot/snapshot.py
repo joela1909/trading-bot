@@ -66,13 +66,23 @@ def make_snapshot(
         price = prices.get(symbol)
         pnl = pnl_pct = None
         if price is not None:
-            pnl = (price - p.entry_price) * p.amount - p.entry_fee
+            pnl = p.unrealized(price) - p.entry_fee
             invested = p.entry_price * p.amount
             pnl_pct = pnl / invested * 100.0 if invested else None
+        # Groesse: Nennwert zum aktuellen Kurs, gebundene Sicherheit und Verlust bis zum Stop
+        notional = p.amount * (price if price is not None else p.entry_price)
+        risk_quote = abs(p.entry_price - p.stop_loss) * p.amount
         positions.append(
             {
                 "symbol": symbol,
+                "side": p.side,
                 "amount": p.amount,
+                "notional": notional,
+                "size_pct": notional / equity * 100.0 if equity else None,
+                "margin": p.entry_price * p.amount / p.leverage,
+                "leverage": p.leverage,
+                "risk_quote": risk_quote,
+                "risk_pct": risk_quote / equity * 100.0 if equity else None,
                 "entry_price": p.entry_price,
                 "price": price,
                 "stop_loss": p.stop_loss,

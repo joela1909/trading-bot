@@ -13,6 +13,8 @@ class MacdTrendStrategy(Strategy):
     name = "macd_trend"
     buy_reason = "MACD kreuzt nach oben"
     sell_reason = "MACD kreuzt nach unten"
+    short_reason = "MACD kreuzt nach unten"
+    cover_reason = "MACD kreuzt nach oben"
     param_grid = {"macd_fast": [8, 12], "macd_slow": [21, 26], "macd_signal": [9], "trend_ema": [0, 200]}
 
     @classmethod
@@ -36,3 +38,9 @@ class MacdTrendStrategy(Strategy):
         if self.p("trend_ema", 0) > 0:
             buy = buy & (df["close"] > df["ema_trend"]).to_numpy()
         return buy, cross_down(df["macd"], df["macd_signal"])
+
+    def short_signals(self, df):
+        short = cross_down(df["macd"], df["macd_signal"]) & (df["atr"] > 0).to_numpy()
+        if self.p("trend_ema", 0) > 0:
+            short = short & (df["close"] < df["ema_trend"]).to_numpy()
+        return short, cross_up(df["macd"], df["macd_signal"])

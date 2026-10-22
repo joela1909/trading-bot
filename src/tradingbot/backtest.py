@@ -6,10 +6,11 @@ from datetime import datetime, timezone
 import numpy as np
 import pandas as pd
 
-from .config import PaperConfig, ProtectionConfig, StrategyConfig
+from .config import DaytradingConfig, PaperConfig, ProtectionConfig, StrategyConfig
 from .models import MarketLimits, Position, Trade
 from .protections import Protections
 from .risk import RiskManager
+from .session import Session
 from .strategy import Strategy
 
 
@@ -64,8 +65,12 @@ class Backtester:
         paper_cfg: PaperConfig,
         limits: MarketLimits | None = None,
         protections_cfg: ProtectionConfig | None = None,
+        daytrading: DaytradingConfig | None = None,
+        leverage: float = 1.0,
     ):
+        self.leverage = max(1.0, float(leverage))
         self.protections_cfg = protections_cfg
+        self.daytrading = daytrading if daytrading is not None and daytrading.enabled else None
         self.strategy = strategy
         self.risk = risk
         self.scfg = strategy_cfg
@@ -81,7 +86,7 @@ class Backtester:
         start: int = 1,
         end: int | None = None,
         prepared: bool = False,
-        signals: tuple[np.ndarray, np.ndarray] | None = None,
+        signals: tuple | None = None,
     ) -> BacktestResult:
         """Simuliert die Strategie auf den Kerzen [start, end). Indikatoren werden auf der ganzen Reihe
         berechnet (sie sind kausal), der Handel beginnt aber erst bei `start` mit frischem Startkapital."""
@@ -89,7 +94,12 @@ class Backtester:
             raise ValueError(f"Zu wenig Kerzen ({len(df)}), mindestens {self.strategy.warmup_bars} noetig")
         if not prepared:
             df = self.strategy.prepare(df)
-        buy_sig, sell_sig = signals if signals is not None else self.strategy.signals(df)
+        if signals is None:
+            signals = self.strategy.all_signals(df)
+        buy_sig, sell_sig = signals[0], signals[1]
+        short_sig = signals[2] if len(signals) > 2 else None
+        cover_sig = signals[3] if len(signals) > 3 else None
+        allow_short = bool(self.scfg.allow_short and short_sig is not None and cover_sig is not None)
         n = len(df)
         end = n if end is None else min(end, n)
         start = max(start, 1)
@@ -103,15 +113,36 @@ class Backtester:
         atr_v = df["atr"].tolist()
         buy = buy_sig.tolist()
         sell = sell_sig.tolist()
+        short = short_sig.tolist() if allow_short else None
+        cover = cover_sig.tolist() if allow_short else None
 
         fee_rate, slip = self.fee_rate, self.slip
         stop_mult = self.scfg.stop_atr_mult
         tp_mult = self.scfg.take_profit_atr_mult
         trailing = self.scfg.trailing_stop
+        lev = self.leverage
 
         tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
         prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
 
+        # Tageshandel: Einstiegsfenster, Schliessen zur flat_time, max. Einstiege und Tagesverlustlimit
+        dt = self.daytrading
+        if dt is not None:
+            minute, day = Session(dt).bar_times(ts, tf_ms)
+            minute, day = minute.tolist(), day.tolist()
+            flat_min, entry_lo, entry_hi = dt.flat_min, dt.entry_start_min, dt.entry_end_min
+            max_entries = dt.max_trades_per_day
+            max_hold_ms = dt.max_hold_minutes * 60_000
+            max_daily_loss = self.risk.cfg.max_daily_loss_pct / 100.0
+        cur_day = None
+        day_start_eq = 0.0
+        entries_today = 0
+        halted = False
+        pos_day = None
+        pos_ts = 0
+
+        # Konto wie bei Futures: Einstieg bindet Nennwert / Hebel als Sicherheit, Ausstieg gibt sie mit dem Kursgewinn zurueck.
+        # Fuer Spot-Long mit Hebel 1 ist das genau Kaufen und Verkaufen.
         cash = self.start_balance
         pos: Position | None = None
         trades: list[Trade] = []
@@ -121,13 +152,15 @@ class Backtester:
 
         def close_position(p: Position, price: float, ms: int, reason: str) -> None:
             nonlocal cash, total_fees
-            proceeds = p.amount * price
-            fee = proceeds * fee_rate
-            cash += proceeds - fee
+            fee = p.amount * price * fee_rate
+            gross = p.unrealized(price)
+            cash += p.entry_price * p.amount / p.leverage + gross - fee
             fees = fee + p.entry_fee
             total_fees += fee
-            pnl = (price - p.entry_price) * p.amount - fees
-            trades.append(Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason))
+            pnl = gross - fees
+            trades.append(
+                Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason, p.side)
+            )
             if prot is not None:
                 prot.on_exit(symbol, reason, ms)
 
@@ -135,40 +168,77 @@ class Backtester:
             i = start + k
             c = close[i]
             a = atr_v[i]
+            if dt is not None and day[i] != cur_day:
+                cur_day = day[i]
+                day_start_eq = cash + (pos.value(close[i - 1]) if pos is not None else 0.0)
+                entries_today = 0
+                halted = False
             if pos is not None:
+                is_short = pos.side == "short"
+                out = (1 + slip) if is_short else (1 - slip)  # Kursabweichung beim Schliessen
                 exit_price = None
                 reason = ""
-                if low[i] <= pos.stop_loss:
-                    exit_price, reason = pos.stop_loss * (1 - slip), "stop_loss"
-                elif pos.take_profit is not None and high[i] >= pos.take_profit:
-                    exit_price, reason = pos.take_profit * (1 - slip), "take_profit"
-                elif sell[i]:
-                    exit_price, reason = c * (1 - slip), "signal"
+                if (high[i] >= pos.stop_loss) if is_short else (low[i] <= pos.stop_loss):
+                    exit_price, reason = pos.stop_loss * out, "stop_loss"
+                elif pos.take_profit is not None and ((low[i] <= pos.take_profit) if is_short else (high[i] >= pos.take_profit)):
+                    exit_price, reason = pos.take_profit * out, "take_profit"
+                elif dt is not None and (day[i] != pos_day or minute[i] >= flat_min):
+                    exit_price, reason = c * out, "session_end"
+                elif dt is not None and max_hold_ms and int(ts[i]) - pos_ts >= max_hold_ms:
+                    exit_price, reason = c * out, "max_hold"
+                elif cover[i] if is_short else sell[i]:
+                    exit_price, reason = c * out, "signal"
                 if exit_price is not None:
                     close_position(pos, exit_price, int(ts[i]), reason)
                     pos = None
-                elif trailing and high[i] > pos.highest_price:
-                    pos.highest_price = high[i]
-                    if a == a and a > 0:
+                    if dt is not None and day_start_eq > 0 and (day_start_eq - cash) / day_start_eq >= max_daily_loss:
+                        halted = True
+                elif trailing and a == a and a > 0:
+                    if is_short:
+                        if low[i] < pos.highest_price:
+                            pos.highest_price = low[i]
+                            pos.stop_loss = min(pos.stop_loss, self.strategy.trailing_stop_short(pos.highest_price, a))
+                    elif high[i] > pos.highest_price:
+                        pos.highest_price = high[i]
                         pos.stop_loss = max(pos.stop_loss, self.strategy.trailing_stop(pos.highest_price, a))
-            elif buy[i] and a == a and a > 0 and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0]):
-                entry = c * (1 + slip)
-                stop = entry - stop_mult * a
-                amount = self.risk.position_size(cash, cash, entry, stop, self.limits)
+            elif (
+                (buy[i] or (allow_short and short[i]))
+                and a == a
+                and a > 0
+                and (
+                    dt is None
+                    or (
+                        entry_lo <= minute[i] < entry_hi
+                        and minute[i] < flat_min
+                        and not halted
+                        and (not max_entries or entries_today < max_entries)
+                    )
+                )
+                and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0])
+            ):
+                side = "long" if buy[i] else "short"
+                sign = 1 if buy[i] else -1
+                entry = c * (1 + sign * slip)
+                stop = entry - sign * stop_mult * a
+                amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev)
                 if amount > 0:
-                    cost = amount * entry
-                    fee = cost * fee_rate
-                    cash -= cost + fee
+                    notional = amount * entry
+                    fee = notional * fee_rate
+                    cash -= notional / lev + fee
                     total_fees += fee
-                    tp = entry + tp_mult * a if tp_mult > 0 else None
-                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a)
-            equity[k] = cash + (pos.amount * c if pos is not None else 0.0)
+                    tp = entry + sign * tp_mult * a if tp_mult > 0 else None
+                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev)
+                    entries_today += 1
+                    pos_day = day[i] if dt is not None else None
+                    pos_ts = int(ts[i])
+            equity[k] = cash + (pos.value(c) if pos is not None else 0.0)
             in_pos[k] = pos is not None
             if prot is not None:
                 prot.update_equity(equity[k], int(ts[i]))
 
         if pos is not None:
-            close_position(pos, close[end - 1] * (1 - slip), int(ts[end - 1]), "end_of_data")
+            out = (1 + slip) if pos.side == "short" else (1 - slip)
+            close_position(pos, close[end - 1] * out, int(ts[end - 1]), "end_of_data")
             equity[-1] = cash
 
         curve = pd.Series(equity, index=pd.to_datetime(ts[start:end], unit="ms", utc=True), name="equity")

@@ -10,10 +10,11 @@ from pathlib import Path
 from .config import Settings
 from .data import DataFeed, timeframe_seconds
 from .exchange import Broker
-from .models import Fill, Position, Signal, Trade, utcnow_iso
+from .models import Fill, Position, Signal, Trade, side_sign, utcnow_iso
 from .notify import Notifier
 from .protections import Protections
 from .risk import RiskManager
+from .session import Session, parse_iso
 from .snapshot import make_snapshot
 from .state import BotState
 from .strategy import Strategy
@@ -53,13 +54,14 @@ class TradingBot:
         self.last_cycle: str | None = None
         self.running = False
         self._snapshot: dict | None = None
+        self.session: Session | None = Session(self.cfg.daytrading) if self.cfg.daytrading.enabled else None
 
     # ----------------------------------------------------------------- helpers
     def equity(self, prices: dict[str, float] | None = None) -> float:
         eq = self.broker.balance_quote()
         for symbol, pos in self.state.positions.items():
             price = prices.get(symbol) if prices and symbol in prices else self.feed.fetch_price(symbol)
-            eq += pos.amount * price
+            eq += pos.value(price)
         return eq
 
     def _save(self) -> None:
@@ -97,9 +99,10 @@ class TradingBot:
     def _context(self, symbol: str, price: float, pos: Position | None) -> dict:
         position = None
         if pos is not None:
-            pnl_pct = (price / pos.entry_price - 1.0) * 100.0 if pos.entry_price else 0.0
+            pnl_pct = side_sign(pos.side) * (price / pos.entry_price - 1.0) * 100.0 if pos.entry_price else 0.0
             position = {
                 "amount": pos.amount,
+                "side": pos.side,
                 "entry_price": pos.entry_price,
                 "stop_loss": pos.stop_loss,
                 "take_profit": pos.take_profit,
@@ -149,12 +152,18 @@ class TradingBot:
         log.warning("Neue Einstiege wieder aktiv (Dashboard)")
         return self.build_snapshot()
 
+    @staticmethod
+    def _now() -> datetime:
+        return datetime.now(timezone.utc)
+
     def _roll_day(self, equity: float) -> None:
-        today = datetime.now(timezone.utc).strftime("%Y-%m-%d")
+        now = self._now()
+        today = self.session.day(now) if self.session else now.strftime("%Y-%m-%d")
         if self.state.day != today:
             self.state.day = today
             self.state.day_start_equity = equity
             self.state.entries_halted_for_day = False
+            self.state.entries_today = 0
             log.info("Neuer Handelstag %s, Startkapital %.2f %s", today, equity, self.cfg.quote_currency)
 
     def reconcile(self) -> None:
@@ -232,7 +241,7 @@ class TradingBot:
         return bool(self.cfg.execution.stoploss_on_exchange and self.broker.supports_exchange_stop())
 
     def _arm_exchange_stop(self, symbol: str, pos: Position) -> None:
-        if not self._exchange_stops_enabled():
+        if not self._exchange_stops_enabled() or pos.is_short:
             return
         order_id = self.broker.place_stop(symbol, pos.amount, pos.stop_loss)
         if order_id:
@@ -283,27 +292,41 @@ class TradingBot:
     def _manage_position(self, symbol: str, pos: Position, price: float, df, is_new_candle: bool) -> None:
         if self._sync_exchange_stop(symbol, pos):
             return
-        if price > pos.highest_price:
+        if self.session is not None:
+            reason = self.session.must_close(self._now(), parse_iso(pos.opened_at))
+            if reason:
+                log.info("%s: Tageshandel, Position wird geschlossen (%s)", symbol, reason)
+                self._close_position(symbol, pos, reason)
+                return
+        # bester Kurs seit Einstieg: bei Long das Hoch, bei Short das Tief
+        if (price < pos.highest_price) if pos.is_short else (price > pos.highest_price):
             pos.highest_price = price
             if self.cfg.strategy.trailing_stop:
                 atr_now = float(df["atr"].iloc[-1])
                 if not math.isnan(atr_now) and atr_now > 0:
-                    new_stop = self.strategy.trailing_stop(pos.highest_price, atr_now)
-                    if new_stop > pos.stop_loss:
-                        log.info("%s: Trailing-Stop %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
-                        pos.stop_loss = new_stop
-                        if self._raise_exchange_stop(symbol, pos):
-                            return
+                    if pos.is_short:
+                        new_stop = self.strategy.trailing_stop_short(pos.highest_price, atr_now)
+                        if new_stop < pos.stop_loss:
+                            log.info("%s: Trailing-Stop (Short) %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
+                            pos.stop_loss = new_stop
+                    else:
+                        new_stop = self.strategy.trailing_stop(pos.highest_price, atr_now)
+                        if new_stop > pos.stop_loss:
+                            log.info("%s: Trailing-Stop %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
+                            pos.stop_loss = new_stop
+                            if self._raise_exchange_stop(symbol, pos):
+                                return
 
-        if price <= pos.stop_loss:
+        if pos.stop_hit(price):
             self._close_position(symbol, pos, "stop_loss")
             return
-        if pos.take_profit is not None and price >= pos.take_profit:
+        if pos.take_profit_hit(price):
             self._close_position(symbol, pos, "take_profit")
             return
         if is_new_candle:
             decision = self.strategy.decide(df, context=self._context(symbol, price, pos))
-            if decision.signal == Signal.SELL:
+            exit_signal = Signal.COVER if pos.is_short else Signal.SELL
+            if decision.signal == exit_signal:
                 self._close_position(symbol, pos, f"signal: {decision.reason}")
 
     def _maybe_enter(self, symbol: str, price: float, df) -> None:
@@ -313,6 +336,14 @@ class TradingBot:
         if self.state.entries_halted_for_day:
             log.info("%s: Tagesverlustlimit erreicht, kein Einstieg", symbol)
             return
+        if self.session is not None:
+            dt = self.cfg.daytrading
+            if not self.session.entry_allowed(self._now()):
+                log.info("%s: kein Einstieg, ausserhalb der Einstiegszeit %s-%s", symbol, dt.entry_start, dt.entry_end)
+                return
+            if dt.max_trades_per_day and self.state.entries_today >= dt.max_trades_per_day:
+                log.info("%s: kein Einstieg, max. %d Einstiege pro Tag erreicht", symbol, dt.max_trades_per_day)
+                return
         allowed, why = self.protections.entry_allowed(symbol, int(time.time() * 1000))
         if not allowed:
             log.info("%s: kein Einstieg, %s", symbol, why)
@@ -321,24 +352,29 @@ class TradingBot:
             log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
             return
         decision = self.strategy.decide(df, context=self._context(symbol, price, None))
-        if decision.signal != Signal.BUY:
+        is_short = decision.signal == Signal.SHORT
+        if decision.signal != Signal.BUY and not (is_short and self.cfg.strategy.allow_short):
             log.debug("%s: %s (%s)", symbol, decision.signal.value, decision.reason)
             return
         if decision.atr is None or decision.atr <= 0:
             return
+        side = "short" if is_short else "long"
+        sign = side_sign(side)
 
         equity = self.equity()
         free_quote = self.broker.balance_quote()
-        stop = price - self.cfg.strategy.stop_atr_mult * decision.atr
-        amount = self.risk.position_size(equity, free_quote, price, stop, self.broker.limits(symbol))
+        stop = price - sign * self.cfg.strategy.stop_atr_mult * decision.atr
+        amount = self.risk.position_size(
+            equity, free_quote, price, stop, self.broker.limits(symbol), side=side, leverage=self.cfg.leverage
+        )
         if amount <= 0:
-            log.info("%s: Kaufsignal, aber Positionsgroesse unter Mindestorder (Kapital %.2f)", symbol, equity)
+            log.info("%s: %s-Signal, aber Positionsgroesse unter Mindestorder (Kapital %.2f)", symbol, side, equity)
             return
 
-        fill = self.broker.buy(symbol, amount)
-        entry_stop = fill.price - self.cfg.strategy.stop_atr_mult * decision.atr
+        fill = self.broker.open_position(symbol, side, amount)
+        entry_stop = fill.price - sign * self.cfg.strategy.stop_atr_mult * decision.atr
         tp_mult = self.cfg.strategy.take_profit_atr_mult
-        take_profit = fill.price + tp_mult * decision.atr if tp_mult > 0 else None
+        take_profit = fill.price + sign * tp_mult * decision.atr if tp_mult > 0 else None
         pos = Position(
             symbol=symbol,
             amount=fill.amount,
@@ -349,13 +385,18 @@ class TradingBot:
             highest_price=fill.price,
             entry_fee=fill.fee,
             atr_at_entry=decision.atr,
+            side=side,
+            leverage=self.cfg.leverage,
         )
         self.state.positions[symbol] = pos
+        self.state.entries_today += 1
         self._arm_exchange_stop(symbol, pos)
         self._save()
         tp_text = f"{take_profit:.4f}" if take_profit is not None else "aus"
         msg = (
-            f"KAUF {symbol}: {fill.amount:.6f} @ {fill.price:.4f} "
+            f"{'SHORT' if is_short else 'KAUF'} {symbol}: {fill.amount:.6f} @ {fill.price:.4f} "
+            f"(Groesse {fill.amount * fill.price:.2f} {self.cfg.quote_currency}, "
+            f"Risiko bis Stop {abs(fill.price - entry_stop) * fill.amount:.2f} {self.cfg.quote_currency}) "
             f"(Stop {entry_stop:.4f}, TP {tp_text}, {decision.reason})"
         )
         self.notifier.send(msg)
@@ -372,9 +413,9 @@ class TradingBot:
             if fill is None:
                 pos.stop_order_id = pos.exchange_stop = None
         if fill is None:
-            fill = self.broker.sell(symbol, pos.amount)
+            fill = self.broker.close_position(symbol, pos.side, pos.amount)
         fees = fill.fee + pos.entry_fee
-        pnl = (fill.price - pos.entry_price) * pos.amount - fees
+        pnl = side_sign(pos.side) * (fill.price - pos.entry_price) * pos.amount - fees
         invested = pos.entry_price * pos.amount
         pnl_pct = pnl / invested * 100.0 if invested else 0.0
         trade = Trade(
@@ -388,13 +429,15 @@ class TradingBot:
             opened_at=pos.opened_at,
             closed_at=fill.timestamp,
             reason=reason,
+            side=pos.side,
         )
         self.state.trades.append(trade)
         self.protections.on_exit(symbol, reason, int(time.time() * 1000))
         del self.state.positions[symbol]
         self._save()
         self.notifier.send(
-            f"VERKAUF {symbol}: {pos.amount:.6f} @ {fill.price:.4f} -> PnL {pnl:+.2f} {self.cfg.quote_currency} ({pnl_pct:+.2f}%), Grund: {reason}"
+            f"{'SHORT ZU' if pos.is_short else 'VERKAUF'} {symbol}: {pos.amount:.6f} @ {fill.price:.4f} "
+            f"(Groesse {pos.amount * pos.entry_price:.2f} {self.cfg.quote_currency}) -> PnL {pnl:+.2f} {self.cfg.quote_currency} ({pnl_pct:+.2f}%), Grund: {reason}"
         )
 
         if self.state.day_start_equity and not self.state.entries_halted_for_day:
@@ -417,6 +460,12 @@ class TradingBot:
         self.build_snapshot()
         self.notifier.send(
             f"Bot gestartet ({self.broker.name}-Modus, {self.cfg.exchange}, {', '.join(self.cfg.symbols)}, {self.cfg.timeframe})"
+            + (
+                f", Tageshandel {self.cfg.daytrading.entry_start}-{self.cfg.daytrading.entry_end}, "
+                f"flat ab {self.cfg.daytrading.flat_time} {self.cfg.daytrading.timezone}"
+                if self.session
+                else ""
+            )
         )
         interval = max(5, self.cfg.poll_interval_seconds)
         while not self._stop:

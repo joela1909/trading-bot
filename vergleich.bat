@@ -6,8 +6,8 @@ if not exist ".venv\Scripts\tradingbot.exe" (
   exit /b 1
 )
 set "SINCE="
-set /p SINCE=Startdatum der Daten, Enter fuer 2021-01-01: 
-if "%SINCE%"=="" set "SINCE=2021-01-01"
+set /p SINCE=Startdatum der Daten, Enter fuer 2023-01-01: 
+if "%SINCE%"=="" set "SINCE=2023-01-01"
 echo.
 echo Lade Kurse und teste alle Strategien. Das dauert einige Minuten ...
 ".venv\Scripts\tradingbot.exe" compare --symbols BTC/USDT,ETH/USDT,SOL/USDT --since %SINCE%

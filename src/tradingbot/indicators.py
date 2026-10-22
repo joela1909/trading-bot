@@ -33,6 +33,14 @@ def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period, min_periods=period).mean()
 
 
+def session_vwap(df: pd.DataFrame, day_key: pd.Series) -> pd.Series:
+    """Volumengewichteter Durchschnittspreis, beginnt jeden (lokalen) Tag neu."""
+    typical = (df["high"] + df["low"] + df["close"]) / 3.0
+    pv = (typical * df["volume"]).groupby(day_key.to_numpy()).cumsum()
+    vol = df["volume"].groupby(day_key.to_numpy()).cumsum()
+    return (pv / vol.replace(0.0, np.nan)).where(vol > 0, typical)
+
+
 def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
     line = ema(series, fast) - ema(series, slow)
     return line, ema(line, signal)

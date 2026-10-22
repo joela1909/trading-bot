@@ -4,7 +4,7 @@ from pathlib import Path
 from typing import Literal
 
 import yaml
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 from pydantic_settings import BaseSettings, SettingsConfigDict
 
 Mode = Literal["paper", "live"]
@@ -29,6 +29,7 @@ class StrategyConfig(BaseModel):
     stop_atr_mult: float = 2.0
     take_profit_atr_mult: float = 4.0
     trailing_stop: bool = True
+    allow_short: bool = False  # Short-Positionen, nur mit market: futures
 
     @field_validator("slow_ema")
     @classmethod
@@ -45,6 +46,61 @@ class RiskConfig(BaseModel):
     max_open_positions: int = 3
     max_daily_loss_pct: float = 3.0
     min_order_quote: float = 10.0
+
+
+def _parse_hhmm(value: str) -> int:
+    try:
+        hh, mm = value.split(":")
+        minutes = int(hh) * 60 + int(mm)
+    except (ValueError, AttributeError) as exc:
+        raise ValueError(f"Uhrzeit '{value}' muss im Format HH:MM sein") from exc
+    if not 0 <= minutes <= 24 * 60:
+        raise ValueError(f"Uhrzeit '{value}' ausserhalb von 00:00 bis 24:00")
+    return minutes
+
+
+class DaytradingConfig(BaseModel):
+    """Regeln fuer den Tageshandel. Alle Uhrzeiten gelten in `timezone`.
+
+    Neue Einstiege nur zwischen entry_start und entry_end, ab flat_time werden alle Positionen geschlossen.
+    Keine Position wird ueber Nacht gehalten."""
+
+    enabled: bool = False
+    timezone: str = "Europe/Berlin"
+    entry_start: str = "08:00"
+    entry_end: str = "21:30"
+    flat_time: str = "22:00"
+    max_trades_per_day: int = Field(default=6, ge=0)  # 0 = unbegrenzt
+    max_hold_minutes: int = Field(default=0, ge=0)  # 0 = nur durch flat_time begrenzt
+
+    @field_validator("timezone")
+    @classmethod
+    def _tz_exists(cls, v: str):
+        from zoneinfo import ZoneInfo, ZoneInfoNotFoundError
+
+        try:
+            ZoneInfo(v)
+        except (ZoneInfoNotFoundError, ValueError) as exc:
+            raise ValueError(f"Unbekannte Zeitzone '{v}'") from exc
+        return v
+
+    @model_validator(mode="after")
+    def _times_ordered(self):
+        if not self.entry_start_min < self.entry_end_min <= self.flat_min:
+            raise ValueError("Es muss gelten: entry_start < entry_end <= flat_time (ohne Mitternacht dazwischen)")
+        return self
+
+    @property
+    def entry_start_min(self) -> int:
+        return _parse_hhmm(self.entry_start)
+
+    @property
+    def entry_end_min(self) -> int:
+        return _parse_hhmm(self.entry_end)
+
+    @property
+    def flat_min(self) -> int:
+        return _parse_hhmm(self.flat_time)
 
 
 class NotificationConfig(BaseModel):
@@ -76,6 +132,13 @@ class AiConfig(BaseModel):
     max_tokens: int = Field(default=16000, ge=2000)
 
 
+class FuturesConfig(BaseModel):
+    """Einstellungen fuer USDT-Perpetual-Futures (noetig fuer Short-Positionen)."""
+
+    leverage: float = Field(default=1.0, ge=1.0, le=10.0)
+    margin_mode: Literal["isolated", "cross"] = "isolated"
+
+
 class DashboardConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=8765, ge=0, le=65535)
@@ -84,6 +147,7 @@ class DashboardConfig(BaseModel):
 class BotConfig(BaseModel):
     mode: Mode = "paper"
     exchange: str = "binance"
+    market: Literal["spot", "futures"] = "spot"
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     quote_currency: str = "USDT"
     timeframe: str = "1h"
@@ -98,6 +162,38 @@ class BotConfig(BaseModel):
     protections: ProtectionConfig = Field(default_factory=ProtectionConfig)
     execution: ExecutionConfig = Field(default_factory=ExecutionConfig)
     ai: AiConfig = Field(default_factory=AiConfig)
+    daytrading: DaytradingConfig = Field(default_factory=DaytradingConfig)
+    futures: FuturesConfig = Field(default_factory=FuturesConfig)
+
+    @property
+    def is_futures(self) -> bool:
+        return self.market == "futures"
+
+    def market_symbol(self, symbol: str) -> str:
+        """Schreibweise fuer ccxt: bei Futures BTC/USDT -> BTC/USDT:USDT."""
+        if self.is_futures and ":" not in symbol:
+            return f"{symbol}:{symbol.split('/')[1]}"
+        return symbol
+
+    @property
+    def leverage(self) -> float:
+        return self.futures.leverage if self.is_futures else 1.0
+
+    @model_validator(mode="after")
+    def _market_rules(self):
+        if self.strategy.allow_short and not self.is_futures:
+            raise ValueError("Short-Positionen (strategy.allow_short) gehen nur mit market: futures, nicht im Spot-Handel")
+        if self.strategy.allow_short and self.strategy.name == "claude_advisor":
+            raise ValueError("Die KI-Strategie claude_advisor kann noch keine Short-Positionen. Setze allow_short: false.")
+        if self.is_futures:
+            # ccxt-Schreibweise fuer USDT-Perpetuals: BTC/USDT -> BTC/USDT:USDT
+            self.symbols = [s if ":" in s else f"{s}:{s.split('/')[1]}" for s in self.symbols]
+        return self
+
+    @property
+    def session_cfg(self) -> DaytradingConfig | None:
+        """Tageshandel-Regeln, falls eingeschaltet, sonst None."""
+        return self.daytrading if self.daytrading.enabled else None
 
     @field_validator("symbols")
     @classmethod
@@ -139,10 +235,15 @@ class Settings(BaseModel):
                 raise RuntimeError("Live-Modus: EXCHANGE_API_KEY und EXCHANGE_API_SECRET fehlen in .env")
             if self.bot.exchange in PASSPHRASE_EXCHANGES and not self.secrets.exchange_api_password:
                 raise RuntimeError(f"{self.bot.exchange} verlangt zusaetzlich eine Passphrase: EXCHANGE_API_PASSWORD fehlt in .env")
+        if self.mode == "live" and self.bot.is_futures:
+            raise RuntimeError(
+                "Futures (und damit Short-Positionen) sind bisher nur im Papierhandel freigegeben. "
+                "Die Live-Anbindung fuer Futures ist noch nicht gegen eine echte Boerse getestet."
+            )
         if self.bot.strategy.name == "claude_advisor" and not self.secrets.anthropic_api_key:
             raise RuntimeError("Die Strategie claude_advisor braucht ANTHROPIC_API_KEY in .env (Zugang zur Anthropic-API).")
         for symbol in self.bot.symbols:
-            if "/" not in symbol or symbol.split("/")[1] != self.bot.quote_currency:
+            if "/" not in symbol or symbol.split("/")[1].split(":")[0] != self.bot.quote_currency:
                 raise RuntimeError(
                     f"Symbol {symbol} passt nicht zur quote_currency {self.bot.quote_currency}"
                 )
