@@ -17,6 +17,7 @@ from .dashboard import DashboardServer
 from .data import CcxtDataFeed, load_csv, load_history
 from .exchange import LiveBroker, PaperBroker
 from .logging_setup import setup_logging
+from .overlap import analyze_symbol, combine, format_overlap
 from .notify import Notifier, TelegramNotifier
 from .risk import RiskManager
 from .snapshot import make_snapshot
@@ -212,6 +213,38 @@ def _load_market_data(args: argparse.Namespace, cfg, timeframe: str):
     return {s: load_history(feed, s, timeframe, args.since, args.until, args.cache_dir) for s in symbols}
 
 
+def cmd_overlap(args: argparse.Namespace) -> int:
+    settings = load_settings(args.config)
+    setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
+    cfg = settings.bot
+    timeframe = args.timeframe or cfg.timeframe
+    names = [n.strip() for n in args.strategies.split(",")] if args.strategies else list(REGISTRY)
+    unknown = [n for n in names if n not in REGISTRY]
+    if unknown:
+        print(f"Unbekannte oder nicht backtestbare Strategie(n): {unknown}. Verfuegbar: {sorted(REGISTRY)}", file=sys.stderr)
+        return 2
+    if len(names) < 2:
+        print("Mindestens zwei Strategien noetig.", file=sys.stderr)
+        return 2
+    data = _load_market_data(args, cfg, timeframe)
+    if data is None:
+        return 2
+    prot = None if args.no_protections else cfg.protections
+    per_symbol = [
+        analyze_symbol(df, symbol, names, cfg.strategy, cfg.risk, cfg.paper, prot, window=args.window)
+        for symbol, df in data.items()
+    ]
+    total = combine(per_symbol)
+    report = format_overlap(total, synthetic=bool(args.demo), per_symbol=per_symbol if len(per_symbol) > 1 else None)
+    out = Path(args.out)
+    out.mkdir(parents=True, exist_ok=True)
+    path = out / f"uebereinstimmung_{datetime.now(timezone.utc).strftime('%Y%m%d-%H%M%S')}.md"
+    path.write_text(report, encoding="utf-8")
+    print(report)
+    print(f"Bericht: {path}")
+    return 0
+
+
 def cmd_check(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
@@ -355,6 +388,20 @@ def main(argv: list[str] | None = None) -> int:
     p_bt.add_argument("--trades", action="store_true", help="alle Trades auflisten")
     p_bt.add_argument("--export", help="Trades als CSV speichern")
     p_bt.set_defaults(func=cmd_backtest)
+
+    p_ovl = sub.add_parser("overlap", help="Wie oft geben die Strategien im Backtest gleichzeitig dasselbe Signal?")
+    p_ovl.add_argument("--symbols", help="Komma-getrennt (Standard: aus config.yaml)")
+    p_ovl.add_argument("--timeframe")
+    p_ovl.add_argument("--since", help="Startdatum YYYY-MM-DD")
+    p_ovl.add_argument("--until")
+    p_ovl.add_argument("--strategies", help="Komma-getrennte Auswahl (Standard: alle backtestbaren)")
+    p_ovl.add_argument("--window", type=int, default=6, help="Zeitfenster in Kerzen fuer die Naeherung")
+    p_ovl.add_argument("--no-protections", action="store_true")
+    p_ovl.add_argument("--cache-dir", default="data")
+    p_ovl.add_argument("--out", default="reports")
+    p_ovl.add_argument("--demo", choices=["trend", "meanrev", "random"])
+    p_ovl.add_argument("--demo-bars", type=int, default=20000, help=argparse.SUPPRESS)
+    p_ovl.set_defaults(func=cmd_overlap)
 
     p_chk = sub.add_parser("check", help="Strategien auf Blick in die Zukunft und Abweichung zwischen Backtest und Live pruefen")
     p_chk.add_argument("--symbols", help="Das erste Paar wird geprueft (Standard: aus config.yaml)")

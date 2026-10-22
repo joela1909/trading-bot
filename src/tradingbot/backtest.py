@@ -31,6 +31,7 @@ class BacktestResult:
     total_fees: float
     trades: list[Trade] = field(default_factory=list)
     equity_curve: pd.Series = field(default_factory=pd.Series)
+    in_position: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool), repr=False)
 
     @property
     def calmar(self) -> float | None:
@@ -115,6 +116,7 @@ class Backtester:
         pos: Position | None = None
         trades: list[Trade] = []
         equity = np.empty(end - start)
+        in_pos = np.zeros(end - start, dtype=bool)
         total_fees = 0.0
 
         def close_position(p: Position, price: float, ms: int, reason: str) -> None:
@@ -161,6 +163,7 @@ class Backtester:
                     tp = entry + tp_mult * a if tp_mult > 0 else None
                     pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a)
             equity[k] = cash + (pos.amount * c if pos is not None else 0.0)
+            in_pos[k] = pos is not None
             if prot is not None:
                 prot.update_equity(equity[k], int(ts[i]))
 
@@ -189,4 +192,5 @@ class Backtester:
             total_fees=total_fees,
             trades=trades,
             equity_curve=curve,
+            in_position=in_pos,
         )

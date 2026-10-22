@@ -213,6 +213,17 @@ Der Befehl prüft jede Strategie auf zwei Fehlerquellen, die Backtests unbemerkt
 dazukommen, und Abweichungen zwischen dem Backtest und dem Live-Bot, der nur die letzten Kerzen sieht. `tradingbot compare` führt die Prüfung
 automatisch aus und schließt auffällige Strategien aus.
 
+## Wie oft sind sich die Strategien einig?
+
+```bash
+tradingbot overlap --symbols BTC/USDT,ETH/USDT,SOL/USDT --since 2021-01-01
+```
+
+Der Befehl lässt alle Strategien mit ihren Standardparametern im Backtest laufen und zählt, wie oft sie gleichzeitig dasselbe tun: dieselbe Kerze, ein
+Zeitfenster von standardmäßig 6 Kerzen rückwärts, die Zahl der Strategien gleichzeitig in einer Position und die Übereinstimmung je Paar.
+Der Bericht landet in `reports/`. Verkaufssignale der Rückkehr-Strategien gelten, solange der Kurs über der Mittellinie liegt, und tauchen deshalb
+in fast jeder Kerze auf. Aussagekräftiger sind die Einstiege und die Zeit in der Position.
+
 ## Schutzmechanismen
 
 In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.
@@ -325,6 +336,7 @@ src/tradingbot/
 ├── backtest.py       Backtester mit Kennzahlen, auch für Teilzeiträume
 ├── research.py       Strategievergleich mit Auswahl- und Prüfzeitraum
 ├── analysis.py       Prüfung auf Blick in die Zukunft und Live-Abweichung
+├── overlap.py        Wie oft Strategien gleichzeitig einer Meinung sind
 ├── ai.py             Anbindung an Claude für den KI-Bot
 ├── protections.py    Abkühlphase, Stop-Loss-Serie, Drawdown-Grenze
 ├── synthetic.py      Künstliche Kursreihen zum Testen des Werkzeugs
