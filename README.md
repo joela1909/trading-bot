@@ -263,6 +263,21 @@ Die Strategie läuft bisher nur im Backtest. `tradingbot run` lehnt sie ab, weil
 Die Option `use_atr_stop: false` wird nicht unterstützt, weil die Positionsgröße den Stop braucht. Die Positionsgröße kommt aus dem Risikomanagement
 und nicht aus einer festen Kontraktzahl. Das Handelsfenster und der Tagesbeginn beziehen sich auf die Eröffnungszeit der Kerze.
 
+## Trendsignale mit Bestätigung und Ausstieg
+
+Strategie `trend_signals`: ein eigener, offener Nachbau der Funktionen, die ein verbreiteter Signal-Indikator anbietet. Er ist keine Kopie eines
+fremden Codes und liefert andere Signale als dieser. Die Bausteine sind allgemein bekannte Verfahren:
+
+- **Trendlinie:** eine ATR-Linie, die nur in Trendrichtung nachzieht. Schließt der Kurs darunter oder darüber, dreht der Trend und es entsteht ein Signal
+  (`trail_atr_mult`, `trail_atr_length`). Der Ausstieg erfolgt bei jeder Gegendrehung.
+- **Filter für Einstiege:** Trendstärke über ADX (`adx_min`), Lage zu einem langsamen EMA (`confirm_ema`), relative Volatilität (`max_relative_atr`),
+  kein Einstieg im Squeeze (`block_squeeze`) und eine Mindest-Qualität von 0 bis 4 (`min_quality`). Die Qualität zählt offen nachvollziehbar:
+  ADX stark, Kurs richtig zum EMA, Volumen über dem Schnitt, kein Squeeze.
+- **Gegenbewegungs-Modus** (`mode: 1`): Einstieg gegen den Trend bei einem Ausreißer über das Bollinger-Band mit extremem RSI, Ausstieg an der Mittellinie.
+- Stop-Loss, Take-Profit und Positionsgröße kommen aus den üblichen Einstellungen des Bots.
+
+Es gibt keinen Ersatz für die KI-Bewertung des Originals. Die Strategie ist im Vergleich mit den anderen dabei und läuft auch im Papier- und Live-Handel.
+
 ## Schutzmechanismen
 
 In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.
