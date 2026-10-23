@@ -123,14 +123,16 @@ def test_every_strategy_produces_valid_short_decision(name):
     short, cover = strat.short_signals(df)
     assert short.dtype == bool and cover.dtype == bool and len(short) == len(df)
     assert short.any(), f"{name} shortet nie"
-    assert cover.any(), f"{name} schliesst Shorts nie"
+    if not strat.fixed_levels:  # Strategien mit festen Stop-/Zielkursen steigen nur ueber diese aus
+        assert cover.any(), f"{name} schliesst Shorts nie"
     i = next(int(k) for k in np.flatnonzero(short) if not strat.signals(df)[0][k])
     d = strat.decide(df, i, context={"position": None})
     assert d.signal == Signal.SHORT
     close = float(df["close"].iloc[i])
     assert d.take_profit < close < d.stop_loss
-    j = int(np.flatnonzero(cover)[-1])
-    assert strat.decide(df, j, context={"position": {"side": "short"}}).signal == Signal.COVER
+    if not strat.fixed_levels:
+        j = int(np.flatnonzero(cover)[-1])
+        assert strat.decide(df, j, context={"position": {"side": "short"}}).signal == Signal.COVER
 
 
 def test_no_short_decisions_when_disabled():

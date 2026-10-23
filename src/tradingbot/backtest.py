@@ -107,6 +107,7 @@ class Backtester:
             raise ValueError("Leerer Zeitraum fuer den Backtest")
 
         ts = df["timestamp"].to_numpy()
+        open_ = df["open"].tolist()
         high = df["high"].tolist()
         low = df["low"].tolist()
         close = df["close"].tolist()
@@ -119,8 +120,14 @@ class Backtester:
         fee_rate, slip = self.fee_rate, self.slip
         stop_mult = self.scfg.stop_atr_mult
         tp_mult = self.scfg.take_profit_atr_mult
-        trailing = self.scfg.trailing_stop
+        fixed = bool(getattr(self.strategy, "fixed_levels", False))
+        next_open = bool(getattr(self.strategy, "entry_on_next_open", False))
+        from_fill = bool(getattr(self.strategy, "levels_from_fill", False))
+        trailing = self.scfg.trailing_stop and not fixed
         lev = self.leverage
+        levels = self.strategy.entry_levels(df) if fixed else None
+        if levels is not None:
+            lv_long_stop, lv_long_tp, lv_short_stop, lv_short_tp = (x.tolist() for x in levels)
 
         tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
         prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
@@ -140,6 +147,7 @@ class Backtester:
         halted = False
         pos_day = None
         pos_ts = 0
+        pending = None  # Auftrag aus der Signalkerze, wird zur Eroeffnung der naechsten Kerze ausgefuehrt
 
         # Konto wie bei Futures: Einstieg bindet Nennwert / Hebel als Sicherheit, Ausstieg gibt sie mit dem Kursgewinn zurueck.
         # Fuer Spot-Long mit Hebel 1 ist das genau Kaufen und Verkaufen.
@@ -164,6 +172,29 @@ class Backtester:
             if prot is not None:
                 prot.on_exit(symbol, reason, ms)
 
+        def open_pos(i: int, side: str, entry: float, stop: float, tp: float | None, a: float) -> None:
+            nonlocal cash, total_fees, pos, entries_today, pos_day, pos_ts
+            amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev)
+            if amount <= 0:
+                return
+            fee = amount * entry * fee_rate
+            cash -= amount * entry / lev + fee
+            total_fees += fee
+            pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev)
+            entries_today += 1
+            pos_day = day[i] if dt is not None else None
+            pos_ts = int(ts[i])
+
+        def levels_for(i: int, side: str):
+            """Absolute (Stop, Ziel) der Signalkerze i. None, wenn sie bezogen auf den Schlusskurs ungueltig sind."""
+            stop, tp = (lv_long_stop[i], lv_long_tp[i]) if side == "long" else (lv_short_stop[i], lv_short_tp[i])
+            ref = close[i]
+            if stop != stop or (stop >= ref if side == "long" else stop <= ref):
+                return None
+            if tp == tp and (tp <= ref if side == "long" else tp >= ref):
+                return None
+            return stop, (tp if tp == tp else None)
+
         for k in range(end - start):
             i = start + k
             c = close[i]
@@ -173,6 +204,17 @@ class Backtester:
                 day_start_eq = cash + (pos.value(close[i - 1]) if pos is not None else 0.0)
                 entries_today = 0
                 halted = False
+            if pending is not None:
+                p_side, p_stop, p_tp, p_ref = pending
+                pending = None
+                if pos is None and (dt is None or day[i] == day[i - 1]):
+                    sgn = 1 if p_side == "long" else -1
+                    fill = open_[i] * (1 + sgn * slip)
+                    if from_fill:
+                        p_stop, p_tp = p_stop + (fill - p_ref), (p_tp + (fill - p_ref) if p_tp is not None else None)
+                    still_valid = (p_stop < fill and (p_tp is None or p_tp > fill)) if sgn == 1 else (p_stop > fill and (p_tp is None or p_tp < fill))
+                    if still_valid and a == a and a > 0:
+                        open_pos(i, p_side, fill, p_stop, p_tp, a)
             if pos is not None:
                 is_short = pos.side == "short"
                 out = (1 + slip) if is_short else (1 - slip)  # Kursabweichung beim Schliessen
@@ -218,19 +260,22 @@ class Backtester:
             ):
                 side = "long" if buy[i] else "short"
                 sign = 1 if buy[i] else -1
-                entry = c * (1 + sign * slip)
-                stop = entry - sign * stop_mult * a
-                amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev)
-                if amount > 0:
-                    notional = amount * entry
-                    fee = notional * fee_rate
-                    cash -= notional / lev + fee
-                    total_fees += fee
-                    tp = entry + sign * tp_mult * a if tp_mult > 0 else None
-                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev)
-                    entries_today += 1
-                    pos_day = day[i] if dt is not None else None
-                    pos_ts = int(ts[i])
+                if next_open:
+                    lv = levels_for(i, side) if levels is not None else None
+                    if lv is not None:
+                        pending = (side, lv[0], lv[1], c)
+                else:
+                    entry = c * (1 + sign * slip)
+                    lv = levels_for(i, side) if levels is not None else None
+                    if levels is not None and lv is None:
+                        stop, tp = None, None
+                    elif lv is not None:
+                        stop, tp = lv
+                    else:
+                        stop = entry - sign * stop_mult * a
+                        tp = entry + sign * tp_mult * a if tp_mult > 0 else None
+                    if stop is not None:
+                        open_pos(i, side, entry, stop, tp, a)
             equity[k] = cash + (pos.value(c) if pos is not None else 0.0)
             in_pos[k] = pos is not None
             if prot is not None:

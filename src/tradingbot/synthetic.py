@@ -18,10 +18,12 @@ def _to_ohlcv(log_price: np.ndarray, rng: np.random.Generator, start_ts: int, tf
     return pd.DataFrame({"timestamp": ts.astype("int64"), "open": open_, "high": high, "low": low, "close": close, "volume": 100.0})
 
 
-def make_series(kind: str, n: int = 20_000, seed: int = 1, start_price: float = 100.0, start_ts: int = START_TS, tf_ms: int = TF_MS) -> pd.DataFrame:
+def make_series(kind: str, n: int = 20_000, seed: int = 1, start_price: float = 100.0, start_ts: int = START_TS, tf_ms: int = TF_MS, vol: float | None = None) -> pd.DataFrame:
     """kind: 'random' (Zufallsbewegung), 'trend' (Trendphasen mit Momentum), 'meanrev' (Rueckkehr zum Mittelwert)."""
     rng = np.random.default_rng(seed)
-    vol = 0.006
+    # Schwankung pro Kerze waechst mit der Wurzel der Kerzenlaenge: Stundenkerzen 0,6 %, 5-Minuten-Kerzen etwa 0,17 %.
+    vol = vol if vol is not None else 0.006 * (tf_ms / TF_MS) ** 0.5
+    k = vol / 0.006
     if kind == "random":
         log_p = np.log(start_price) + np.cumsum(rng.normal(0, vol, n))
     elif kind == "trend":
@@ -30,7 +32,7 @@ def make_series(kind: str, n: int = 20_000, seed: int = 1, start_price: float = 
         remaining = 0
         for t in range(1, n):
             if remaining == 0:
-                drift = rng.choice([0.0006, -0.0005, 0.0])
+                drift = rng.choice([0.0006 * k, -0.0005 * k, 0.0])
                 remaining = int(rng.integers(300, 1500))
             remaining -= 1
             ret[t] = drift + 0.12 * ret[t - 1] + rng.normal(0, vol)

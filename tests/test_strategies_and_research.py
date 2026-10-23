@@ -47,7 +47,8 @@ def test_expand_grid_valid_and_complete():
     for name in ALL:
         combos = expand_grid(name)
         assert combos, name
-        assert all(set(EXIT_GRID) <= set(c) for c in combos)
+        needed = set(EXIT_GRID) if REGISTRY[name].use_exit_grid else set(REGISTRY[name].exit_param_keys)
+        assert all(needed <= set(c) for c in combos)
         assert all(REGISTRY[name].valid_params(c) for c in combos)
         assert len({tuple(sorted(c.items())) for c in combos}) == len(combos)
 

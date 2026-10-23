@@ -14,7 +14,7 @@ from .backtest import Backtester
 from .bot import TradingBot
 from .config import Settings, load_settings
 from .dashboard import DashboardServer
-from .data import CcxtDataFeed, load_csv, load_history
+from .data import CcxtDataFeed, load_csv, load_history, timeframe_seconds
 from .exchange import LiveBroker, PaperBroker, PaperFuturesBroker
 from .logging_setup import setup_logging
 from .overlap import analyze_symbol, combine, format_overlap
@@ -177,12 +177,17 @@ def cmd_backtest(args: argparse.Namespace) -> int:
         print(f"Die Strategie {cfg.strategy.name} ist nicht backtestbar. Nutze den Papierhandel: tradingbot run", file=sys.stderr)
         return 2
 
-    if args.csv:
+    if args.demo:
+        df = make_series(args.demo, args.demo_bars, seed=7, tf_ms=timeframe_seconds(timeframe) * 1000)
+        limits = None
+        symbol = "DEMO/USDT"
+        print(f"\n*** DEMO-MODUS: synthetische '{args.demo}'-Daten, Zeitrahmen {timeframe}, keine echten Kurse ***\n")
+    elif args.csv:
         df = load_csv(args.csv)
         limits = None
     else:
         if not args.since:
-            print("Entweder --csv oder --since YYYY-MM-DD angeben.", file=sys.stderr)
+            print("Entweder --csv, --since YYYY-MM-DD oder --demo angeben.", file=sys.stderr)
             return 2
         feed = CcxtDataFeed(cfg.exchange, market_type=cfg.market)
         since_ms = int(datetime.fromisoformat(args.since).replace(tzinfo=timezone.utc).timestamp() * 1000)
@@ -404,6 +409,8 @@ def main(argv: list[str] | None = None) -> int:
     p_bt.add_argument("--csv", help="OHLCV-CSV statt Download")
     p_bt.add_argument("--since", help="Startdatum YYYY-MM-DD (Download von der Boerse)")
     p_bt.add_argument("--until", help="Enddatum YYYY-MM-DD")
+    p_bt.add_argument("--demo", choices=["trend", "meanrev", "random"], help="Mit synthetischen Daten ausprobieren")
+    p_bt.add_argument("--demo-bars", type=int, default=30000, help=argparse.SUPPRESS)
     p_bt.add_argument("--trades", action="store_true", help="alle Trades auflisten")
     p_bt.add_argument("--export", help="Trades als CSV speichern")
     p_bt.add_argument("--no-daytrading", action="store_true", help="Tageshandel-Regeln aus der Konfiguration ignorieren")

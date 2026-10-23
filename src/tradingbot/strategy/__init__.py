@@ -5,6 +5,7 @@ from .claude_advisor import ClaudeAdvisorStrategy
 from .donchian import DonchianStrategy
 from .ema_cross import EmaCrossStrategy
 from .macd_trend import MacdTrendStrategy
+from .pdh_pdl_sweep import PdhPdlSweepFadeStrategy
 from .opening_range import OpeningRangeBreakoutStrategy
 from .rsi_reversion import RsiReversionStrategy
 from .vwap_reversion import VwapReversionStrategy
@@ -13,7 +14,7 @@ from .vwap_reversion import VwapReversionStrategy
 REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (EmaCrossStrategy, DonchianStrategy, RsiReversionStrategy, BollingerReversionStrategy, MacdTrendStrategy,
-                VwapReversionStrategy, OpeningRangeBreakoutStrategy)
+                VwapReversionStrategy, OpeningRangeBreakoutStrategy, PdhPdlSweepFadeStrategy)
 }
 
 # Nur fuer Papier- und Live-Handel, nicht backtestbar.

@@ -230,6 +230,22 @@ Zeitfenster von standardmäßig 6 Kerzen rückwärts, die Zahl der Strategien gl
 Der Bericht landet in `reports/`. Verkaufssignale der Rückkehr-Strategien gelten, solange der Kurs über der Mittellinie liegt, und tauchen deshalb
 in fast jeder Kerze auf. Aussagekräftiger sind die Einstiege und die Zeit in der Position.
 
+## PDH/PDL Sweep Fade
+
+Strategie `pdh_pdl_sweep`: gegen gescheiterte Ausbrüche über das Hoch oder Tief des Vortags handeln. Bricht eine Kerze über das Vortageshoch,
+schließt aber wieder darunter und ist bearish, wird verkauft. Bricht sie unter das Vortagestief, schließt darüber und ist bullish, wird gekauft.
+Das Signal fällt beim Kerzenschluss, der Einstieg erfolgt zur Eröffnung der nächsten Kerze. Stop und Ziel sind feste Kurse je Trade, entweder
+Vielfache der Tages-ATR oder das Extrem der Signalkerze bzw. die Gegenlinie des Vortags. Die Short-Seite braucht `market: futures`.
+
+```bash
+tradingbot --config config.pdh-sweep.yaml backtest --csv daten_5m.csv --trades
+tradingbot --config config.pdh-sweep.yaml backtest --demo random --timeframe 5m
+```
+
+Einstiegsfenster und maximale Trades pro Tag kommen aus dem Abschnitt `daytrading`. Mit `levels_from_fill: true` werden Stop und Ziel vom tatsächlichen
+Fill aus gesetzt statt vom Schlusskurs der Signalkerze. Bei den Standardwerten (Stop 0,3, Ziel 0,1 Tages-ATR) liegt die Gewinnschwelle bei 75 Prozent
+Trefferquote, bevor Kosten abgezogen werden. Die Positionsgröße kommt wie bei allen Strategien aus dem Risikomanagement, nicht aus einer festen Kontraktzahl.
+
 ## Schutzmechanismen
 
 In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.

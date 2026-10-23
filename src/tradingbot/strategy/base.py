@@ -34,6 +34,12 @@ class Strategy(ABC):
     short_reason: str = "Short-Signal"
     cover_reason: str = "Short-Ausstiegssignal"
     param_grid: dict[str, list] = {}
+    # Strategien mit eigenen Stop- und Zielkursen je Trade (statt ATR-Vielfachen aus der Konfiguration):
+    entry_on_next_open = False  # Signal bei Kerzenschluss, Einstieg zur Eroeffnung der naechsten Kerze
+    fixed_levels = False  # entry_levels() liefert absolute Kurse, der Trailing-Stop ist aus
+    levels_from_fill = False  # Abstaende vom Fill-Kurs statt absolute Kurse der Signalkerze verwenden
+    use_exit_grid = True  # False: die Stop-/Ziel-Parameter der Strategie ersetzen EXIT_GRID im Vergleich
+    exit_param_keys: tuple = tuple(EXIT_GRID)  # Parameter, die nur die Stop-/Zielkurse beeinflussen, nicht die Signale
 
     def __init__(self, cfg: StrategyConfig, session: DaytradingConfig | None = None, timeframe: str | None = None):
         self.cfg = cfg
@@ -78,6 +84,11 @@ class Strategy(ABC):
             return buy, sell, None, None
         short, cover = self.short_signals(df)
         return buy, sell, short, cover
+
+    def entry_levels(self, df: pd.DataFrame) -> tuple | None:
+        """Optional: absolute (long_stop, long_ziel, short_stop, short_ziel) je Signalkerze, NaN = kein Ziel.
+        Bezug ist der Schlusskurs der Signalkerze. Nur fuer Strategien mit fixed_levels."""
+        return None
 
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
