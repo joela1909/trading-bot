@@ -40,7 +40,7 @@ def test_each_strategy_produces_valid_buy_decision(name):
     d = strat.decide(df, i)
     assert d.signal == Signal.BUY
     close = float(df["close"].iloc[i])
-    assert d.stop_loss < close < d.take_profit and d.atr > 0
+    assert d.stop_loss < close and (d.take_profit > close if d.take_profit is not None else strat.fixed_levels) and d.atr > 0
 
 
 def test_expand_grid_valid_and_complete():

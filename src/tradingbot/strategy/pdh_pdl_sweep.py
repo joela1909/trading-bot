@@ -120,20 +120,3 @@ class PdhPdlSweepFadeStrategy(Strategy):
         long_tp = c + tp_mult * atr_d if atr_target else pdh
         short_tp = c - tp_mult * atr_d if atr_target else pdl
         return long_stop, long_tp, short_stop, short_tp
-
-    def decide(self, df, i=-1, context=None):
-        """Live: Stop und Ziel aus den Strategie-Levels statt aus den ATR-Vielfachen der Konfiguration."""
-        from ..models import Signal
-
-        d = super().decide(df, i, context)
-        if d.signal not in (Signal.BUY, Signal.SHORT):
-            return d
-        idx = i if i >= 0 else len(df) + i
-        ls, lt, ss, st = (x[idx] for x in self.entry_levels(df))
-        stop, tp = (ls, lt) if d.signal == Signal.BUY else (ss, st)
-        close = float(df["close"].iloc[idx])
-        bad = stop != stop or (stop >= close if d.signal == Signal.BUY else stop <= close)
-        if bad or (tp == tp and (tp <= close if d.signal == Signal.BUY else tp >= close)):
-            return type(d)(Signal.HOLD, "Stop oder Ziel ungueltig", atr=d.atr)
-        d.stop_loss, d.take_profit = float(stop), (float(tp) if tp == tp else None)
-        return d

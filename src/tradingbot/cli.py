@@ -90,6 +90,9 @@ def cmd_run(args: argparse.Namespace) -> int:
     setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
     settings.validate_for_run()
     bot = build_bot(settings)
+    if getattr(bot.strategy, "backtest_only", False):
+        print(f"Fehler: Die Strategie {bot.strategy.name} ist bisher nur im Backtest verfuegbar, nicht im Papier- oder Live-Handel.", file=sys.stderr)
+        return 2
 
     if args.once:
         bot.reconcile()

@@ -1,5 +1,6 @@
 from ..config import AiConfig, DaytradingConfig, StrategyConfig
 from .base import EXIT_GRID, Strategy
+from .anchored_vwap import AnchoredVwapSignalStrategy
 from .bollinger import BollingerReversionStrategy
 from .claude_advisor import ClaudeAdvisorStrategy
 from .donchian import DonchianStrategy
@@ -14,7 +15,8 @@ from .vwap_reversion import VwapReversionStrategy
 REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (EmaCrossStrategy, DonchianStrategy, RsiReversionStrategy, BollingerReversionStrategy, MacdTrendStrategy,
-                VwapReversionStrategy, OpeningRangeBreakoutStrategy, PdhPdlSweepFadeStrategy)
+                VwapReversionStrategy, OpeningRangeBreakoutStrategy, PdhPdlSweepFadeStrategy,
+                AnchoredVwapSignalStrategy)
 }
 
 # Nur fuer Papier- und Live-Handel, nicht backtestbar.

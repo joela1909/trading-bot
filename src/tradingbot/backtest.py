@@ -122,6 +122,9 @@ class Backtester:
         tp_mult = self.scfg.take_profit_atr_mult
         fixed = bool(getattr(self.strategy, "fixed_levels", False))
         next_open = bool(getattr(self.strategy, "entry_on_next_open", False))
+        exit_next_open = bool(getattr(self.strategy, "exit_on_next_open", False))
+        rule = self.strategy.attempt_rule()
+        day_key = self.strategy.day_keys(df).tolist() if rule is not None else None
         from_fill = bool(getattr(self.strategy, "levels_from_fill", False))
         trailing = self.scfg.trailing_stop and not fixed
         lev = self.leverage
@@ -148,6 +151,10 @@ class Backtester:
         pos_day = None
         pos_ts = 0
         pending = None  # Auftrag aus der Signalkerze, wird zur Eroeffnung der naechsten Kerze ausgefuehrt
+        pending_exit = False  # Ausstieg aus der Signalkerze, wird zur Eroeffnung der naechsten Kerze ausgefuehrt
+        att_day = None  # Tagesversuche: Tag, erster Trade abgeschlossen, erster Trade gewonnen, weitere Versuche genutzt
+        att_first_closed = att_first_won = False
+        att_used = 0
 
         # Konto wie bei Futures: Einstieg bindet Nennwert / Hebel als Sicherheit, Ausstieg gibt sie mit dem Kursgewinn zurueck.
         # Fuer Spot-Long mit Hebel 1 ist das genau Kaufen und Verkaufen.
@@ -159,13 +166,18 @@ class Backtester:
         total_fees = 0.0
 
         def close_position(p: Position, price: float, ms: int, reason: str) -> None:
-            nonlocal cash, total_fees
+            nonlocal cash, total_fees, att_first_closed, att_first_won, att_used
             fee = p.amount * price * fee_rate
             gross = p.unrealized(price)
             cash += p.entry_price * p.amount / p.leverage + gross - fee
             fees = fee + p.entry_fee
             total_fees += fee
             pnl = gross - fees
+            if rule is not None:
+                if not att_first_closed:
+                    att_first_closed, att_first_won = True, pnl > 0
+                else:
+                    att_used += 1
             trades.append(
                 Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason, p.side)
             )
@@ -204,6 +216,14 @@ class Backtester:
                 day_start_eq = cash + (pos.value(close[i - 1]) if pos is not None else 0.0)
                 entries_today = 0
                 halted = False
+            if rule is not None and day_key[i] != att_day:
+                att_day, att_first_closed, att_first_won, att_used = day_key[i], False, False, 0
+            if pending_exit:
+                pending_exit = False
+                if pos is not None:
+                    out_px = open_[i] * ((1 + slip) if pos.side == "short" else (1 - slip))
+                    close_position(pos, out_px, int(ts[i]), "signal")
+                    pos = None
             if pending is not None:
                 p_side, p_stop, p_tp, p_ref = pending
                 pending = None
@@ -228,13 +248,15 @@ class Backtester:
                     exit_price, reason = c * out, "session_end"
                 elif dt is not None and max_hold_ms and int(ts[i]) - pos_ts >= max_hold_ms:
                     exit_price, reason = c * out, "max_hold"
-                elif cover[i] if is_short else sell[i]:
+                elif (cover[i] if is_short else sell[i]) and not exit_next_open:
                     exit_price, reason = c * out, "signal"
                 if exit_price is not None:
                     close_position(pos, exit_price, int(ts[i]), reason)
                     pos = None
                     if dt is not None and day_start_eq > 0 and (day_start_eq - cash) / day_start_eq >= max_daily_loss:
                         halted = True
+                elif exit_next_open and (cover[i] if is_short else sell[i]):
+                    pending_exit = True
                 elif trailing and a == a and a > 0:
                     if is_short:
                         if low[i] < pos.highest_price:
@@ -257,6 +279,11 @@ class Backtester:
                     )
                 )
                 and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0])
+                and (
+                    rule is None
+                    or not att_first_closed
+                    or (not (att_first_won and rule["stop_after_first_win"]) and att_used < rule["additional_attempts"])
+                )
             ):
                 side = "long" if buy[i] else "short"
                 sign = 1 if buy[i] else -1

@@ -129,7 +129,7 @@ def test_every_strategy_produces_valid_short_decision(name):
     d = strat.decide(df, i, context={"position": None})
     assert d.signal == Signal.SHORT
     close = float(df["close"].iloc[i])
-    assert d.take_profit < close < d.stop_loss
+    assert d.stop_loss > close and (d.take_profit < close if d.take_profit is not None else strat.fixed_levels)
     if not strat.fixed_levels:
         j = int(np.flatnonzero(cover)[-1])
         assert strat.decide(df, j, context={"position": {"side": "short"}}).signal == Signal.COVER

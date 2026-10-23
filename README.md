@@ -246,6 +246,23 @@ Einstiegsfenster und maximale Trades pro Tag kommen aus dem Abschnitt `daytradin
 Fill aus gesetzt statt vom Schlusskurs der Signalkerze. Bei den Standardwerten (Stop 0,3, Ziel 0,1 Tages-ATR) liegt die Gewinnschwelle bei 75 Prozent
 Trefferquote, bevor Kosten abgezogen werden. Die Positionsgröße kommt wie bei allen Strategien aus dem Risikomanagement, nicht aus einer festen Kontraktzahl.
 
+## Daily Anchored VWAP Signal Strategy
+
+Strategie `anchored_vwap`: Der VWAP beginnt jeden Tag um Mitternacht New Yorker Zeit neu und wird gegen einen EMA gestellt. Eine Zustandsmaschine pro
+Tag liefert vier Marker: grüner Punkt für den Long-Einstieg, roter Punkt für den Short-Einstieg, grünes Dreieck zum Schließen eines Longs und rotes
+Dreieck zum Schließen eines Shorts. Signale gibt es nur im Handelsfenster, standardmäßig 9:30 bis 16:00 Uhr New Yorker Zeit. Einstieg und Ausstieg
+erfolgen zur Eröffnung der Kerze nach dem Marker, der Stop liegt bei x ATR vom Schlusskurs der Signalkerze. Ein Filter für die relative ATR blockiert
+Einstiege bei zu hoher Schwankung. Nach dem ersten abgeschlossenen Trade des Tages sind weitere Trades nur nach einem Verlust erlaubt, höchstens
+`additional_attempts`, und ein Gewinn beendet den Tag.
+
+```bash
+tradingbot --config config.anchored-vwap.yaml backtest --csv daten_5m.csv --trades
+```
+
+Die Strategie läuft bisher nur im Backtest. `tradingbot run` lehnt sie ab, weil die ergebnisabhängigen Tagesversuche im Live-Bot noch fehlen.
+Die Option `use_atr_stop: false` wird nicht unterstützt, weil die Positionsgröße den Stop braucht. Die Positionsgröße kommt aus dem Risikomanagement
+und nicht aus einer festen Kontraktzahl. Das Handelsfenster und der Tagesbeginn beziehen sich auf die Eröffnungszeit der Kerze.
+
 ## Schutzmechanismen
 
 In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.
