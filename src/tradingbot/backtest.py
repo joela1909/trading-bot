@@ -32,6 +32,7 @@ class BacktestResult:
     total_fees: float
     trades: list[Trade] = field(default_factory=list)
     equity_curve: pd.Series = field(default_factory=pd.Series)
+    in_position: np.ndarray = field(default_factory=lambda: np.zeros(0, dtype=bool), repr=False)
 
     @property
     def calmar(self) -> float | None:
@@ -130,11 +131,20 @@ class Backtester:
         fee_rate, slip = self.fee_rate, self.slip
         stop_mult = self.scfg.stop_atr_mult
         tp_mult = self.scfg.take_profit_atr_mult
-        trailing = self.scfg.trailing_stop
+        fixed = bool(getattr(self.strategy, "fixed_levels", False))
+        next_open = bool(getattr(self.strategy, "entry_on_next_open", False))
+        exit_next_open = bool(getattr(self.strategy, "exit_on_next_open", False))
+        rule = self.strategy.attempt_rule()
+        day_key = self.strategy.day_keys(df).tolist() if rule is not None else None
+        from_fill = bool(getattr(self.strategy, "levels_from_fill", False))
+        trailing = self.scfg.trailing_stop and not fixed
         lev = self.leverage
         min_ratio = self.risk.cfg.min_target_cost_ratio
         round_trip = 2.0 * (fee_rate + slip)  # als Anteil, nicht Prozent
         strat = self.strategy
+        levels = self.strategy.entry_levels(df) if fixed else None
+        if levels is not None:
+            lv_long_stop, lv_long_tp, lv_short_stop, lv_short_tp = (x.tolist() for x in levels)
 
         tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
         prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
@@ -154,6 +164,11 @@ class Backtester:
         halted = False
         pos_day = None
         pos_ts = 0
+        pending = None  # Auftrag aus der Signalkerze, wird zur Eroeffnung der naechsten Kerze ausgefuehrt
+        pending_exit = False  # Ausstieg aus der Signalkerze, wird zur Eroeffnung der naechsten Kerze ausgefuehrt
+        att_day = None  # Tagesversuche: Tag, erster Trade abgeschlossen, erster Trade gewonnen, weitere Versuche genutzt
+        att_first_closed = att_first_won = False
+        att_used = 0
 
         # Konto wie bei Futures: Einstieg bindet Nennwert / Hebel als Sicherheit, Ausstieg gibt sie mit dem Kursgewinn zurueck.
         # Fuer Spot-Long mit Hebel 1 ist das genau Kaufen und Verkaufen.
@@ -161,22 +176,53 @@ class Backtester:
         pos: Position | None = None
         trades: list[Trade] = []
         equity = np.empty(end - start)
+        in_pos = np.zeros(end - start, dtype=bool)
         total_fees = 0.0
 
         def close_position(p: Position, price: float, ms: int, reason: str) -> None:
-            nonlocal cash, total_fees
+            nonlocal cash, total_fees, att_first_closed, att_first_won, att_used
             fee = p.amount * price * fee_rate
             gross = p.unrealized(price)
             cash += p.entry_price * p.amount / p.leverage + gross - fee
             fees = fee + p.entry_fee
             total_fees += fee
             pnl = gross - fees
+            if rule is not None:
+                if not att_first_closed:
+                    att_first_closed, att_first_won = True, pnl > 0
+                else:
+                    att_used += 1
             trades.append(
                 Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason, p.side, p.strategy,
                       p.leverage, p.initial_stop, p.stop_kind if reason.startswith("stop_loss") else "")
             )
             if prot is not None:
                 prot.on_exit(symbol, reason, ms)
+
+        def open_pos(i: int, side: str, entry: float, stop: float, tp: float | None, a: float, trig: str = "") -> None:
+            nonlocal cash, total_fees, pos, entries_today, pos_day, pos_ts, trail_line
+            amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev)
+            if amount <= 0:
+                return
+            fee = amount * entry * fee_rate
+            cash -= amount * entry / lev + fee
+            total_fees += fee
+            trig = trig or strat.name
+            pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev, strategy=trig, initial_stop=stop)
+            trail_line = line_values(strat.trail_line_for(trig))
+            entries_today += 1
+            pos_day = day[i] if dt is not None else None
+            pos_ts = int(ts[i])
+
+        def levels_for(i: int, side: str):
+            """Absolute (Stop, Ziel) der Signalkerze i. None, wenn sie bezogen auf den Schlusskurs ungueltig sind."""
+            stop, tp = (lv_long_stop[i], lv_long_tp[i]) if side == "long" else (lv_short_stop[i], lv_short_tp[i])
+            ref = close[i]
+            if stop != stop or (stop >= ref if side == "long" else stop <= ref):
+                return None
+            if tp == tp and (tp <= ref if side == "long" else tp >= ref):
+                return None
+            return stop, (tp if tp == tp else None)
 
         for k in range(end - start):
             i = start + k
@@ -187,6 +233,25 @@ class Backtester:
                 day_start_eq = cash + (pos.value(close[i - 1]) if pos is not None else 0.0)
                 entries_today = 0
                 halted = False
+            if rule is not None and day_key[i] != att_day:
+                att_day, att_first_closed, att_first_won, att_used = day_key[i], False, False, 0
+            if pending_exit:
+                pending_exit = False
+                if pos is not None:
+                    out_px = open_[i] * ((1 + slip) if pos.side == "short" else (1 - slip))
+                    close_position(pos, out_px, int(ts[i]), "signal")
+                    pos = None
+            if pending is not None:
+                p_side, p_stop, p_tp, p_ref, p_trig = pending
+                pending = None
+                if pos is None and (dt is None or day[i] == day[i - 1]):
+                    sgn = 1 if p_side == "long" else -1
+                    fill = open_[i] * (1 + sgn * slip)
+                    if from_fill:
+                        p_stop, p_tp = p_stop + (fill - p_ref), (p_tp + (fill - p_ref) if p_tp is not None else None)
+                    still_valid = (p_stop < fill and (p_tp is None or p_tp > fill)) if sgn == 1 else (p_stop > fill and (p_tp is None or p_tp < fill))
+                    if still_valid and a == a and a > 0:
+                        open_pos(i, p_side, fill, p_stop, p_tp, a, p_trig)
             if pos is not None:
                 is_short = pos.side == "short"
                 out = (1 + slip) if is_short else (1 - slip)  # Kursabweichung beim Schliessen
@@ -205,13 +270,15 @@ class Backtester:
                     exit_price, reason = c * out, "session_end"
                 elif dt is not None and max_hold_ms and int(ts[i]) - pos_ts >= max_hold_ms:
                     exit_price, reason = c * out, "max_hold"
-                elif cover[i] if is_short else sell[i]:
+                elif (cover[i] if is_short else sell[i]) and not exit_next_open:
                     exit_price, reason = c * out, "signal"
                 if exit_price is not None:
                     close_position(pos, exit_price, int(ts[i]), reason)
                     pos = None
                     if dt is not None and day_start_eq > 0 and (day_start_eq - cash) / day_start_eq >= max_daily_loss:
                         halted = True
+                elif exit_next_open and (cover[i] if is_short else sell[i]):
+                    pending_exit = True
                 elif trailing and trail_line is not None:
                     # Stop an der Linie der Strategie nachziehen, nur in Richtung der Position
                     v = trail_line[i]
@@ -246,28 +313,35 @@ class Backtester:
                     )
                 )
                 and (prot is None or prot.entry_allowed(symbol, int(ts[i]))[0])
+                and (
+                    rule is None
+                    or not att_first_closed
+                    or (not (att_first_won and rule["stop_after_first_win"]) and att_used < rule["additional_attempts"])
+                )
             ):
                 side = "long" if buy[i] else "short"
                 sign = 1 if buy[i] else -1
-                entry = c * (1 + sign * slip)
                 trig = strat.trigger_at(df, i, side)
-                plan_stop, tp = strat.entry_plan(df, i, side, entry, a)
-                # Kostenfilter: Ziel (ohne Ziel: Stop-Abstand) muss ein Vielfaches der Kosten sein
-                target = abs(tp - entry) if tp is not None else abs(entry - plan_stop)
-                worth = min_ratio <= 0 or not strat.cost_check(trig) or target / entry >= min_ratio * round_trip
-                stop, _ = cap_stop(entry, plan_stop, side, lev)
-                amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev) if worth else 0.0
-                if amount > 0:
-                    notional = amount * entry
-                    fee = notional * fee_rate
-                    cash -= notional / lev + fee
-                    total_fees += fee
-                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev, strategy=trig, initial_stop=stop)
-                    trail_line = line_values(strat.trail_line_for(trig))
-                    entries_today += 1
-                    pos_day = day[i] if dt is not None else None
-                    pos_ts = int(ts[i])
+                if next_open:
+                    lv = levels_for(i, side) if levels is not None else None
+                    if lv is not None:
+                        pending = (side, lv[0], lv[1], c, trig)
+                else:
+                    entry = c * (1 + sign * slip)
+                    if levels is not None:
+                        lv = levels_for(i, side)
+                        plan_stop, tp = lv if lv is not None else (None, None)
+                    else:
+                        plan_stop, tp = strat.entry_plan(df, i, side, entry, a)
+                    if plan_stop is not None:
+                        # Kostenfilter: Ziel (ohne Ziel: Stop-Abstand) muss ein Vielfaches der Kosten sein
+                        target = abs(tp - entry) if tp is not None else abs(entry - plan_stop)
+                        worth = min_ratio <= 0 or not strat.cost_check(trig) or target / entry >= min_ratio * round_trip
+                        if worth:
+                            stop, _ = cap_stop(entry, plan_stop, side, lev)
+                            open_pos(i, side, entry, stop, tp, a, trig)
             equity[k] = cash + (pos.value(c) if pos is not None else 0.0)
+            in_pos[k] = pos is not None
             if prot is not None:
                 prot.update_equity(equity[k], int(ts[i]))
 
@@ -297,4 +371,5 @@ class Backtester:
             total_fees=total_fees,
             trades=trades,
             equity_curve=curve,
+            in_position=in_pos,
         )

@@ -67,3 +67,18 @@ def session_vwap(df: pd.DataFrame, day_key: pd.Series) -> pd.Series:
 def macd(series: pd.Series, fast: int = 12, slow: int = 26, signal: int = 9) -> tuple[pd.Series, pd.Series]:
     line = ema(series, fast) - ema(series, slow)
     return line, ema(line, signal)
+
+
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average Directional Index nach Wilder: Staerke eines Trends, unabhaengig von der Richtung."""
+    up, down = df["high"].diff(), -df["low"].diff()
+    plus_dm = pd.Series(np.where((up > down) & (up > 0), up, 0.0), index=df.index)
+    minus_dm = pd.Series(np.where((down > up) & (down > 0), down, 0.0), index=df.index)
+    prev_close = df["close"].shift(1)
+    tr = pd.concat([df["high"] - df["low"], (df["high"] - prev_close).abs(), (df["low"] - prev_close).abs()], axis=1).max(axis=1)
+    alpha = 1.0 / period
+    atr_w = tr.ewm(alpha=alpha, adjust=False, min_periods=period).mean()
+    plus_di = 100.0 * plus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr_w
+    minus_di = 100.0 * minus_dm.ewm(alpha=alpha, adjust=False, min_periods=period).mean() / atr_w
+    dx = 100.0 * (plus_di - minus_di).abs() / (plus_di + minus_di).replace(0.0, np.nan)
+    return dx.ewm(alpha=alpha, adjust=False, min_periods=period).mean()

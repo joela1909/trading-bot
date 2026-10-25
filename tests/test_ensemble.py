@@ -18,7 +18,7 @@ def _series() -> pd.DataFrame:
 
 def test_default_members_are_all_strategies_except_itself():
     s = build_strategy(StrategyConfig(name="ensemble"))
-    assert {m.name for m in s.members} == set(REGISTRY) - {"ensemble", "tsmom", "smc", "supertrend_ai", "reversal_zones"}, "tsmom nur auf Wunsch"
+    assert {m.name for m in s.members} == set(REGISTRY) - {"ensemble", "tsmom", "smc", "supertrend_ai", "reversal_zones", "pdh_pdl_sweep", "anchored_vwap", "trend_signals"}, "neue Strategien nur auf Wunsch"
     assert s.warmup_bars == max(m.warmup_bars for m in s.members)
 
 

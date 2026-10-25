@@ -40,14 +40,15 @@ def test_each_strategy_produces_valid_buy_decision(name):
     d = strat.decide(df, i)
     assert d.signal == Signal.BUY
     close = float(df["close"].iloc[i])
-    assert d.stop_loss < close < d.take_profit and d.atr > 0
+    assert d.stop_loss < close and (d.take_profit > close if d.take_profit is not None else strat.fixed_levels) and d.atr > 0
 
 
 def test_expand_grid_valid_and_complete():
     for name in ALL:
         combos = expand_grid(name)
         assert combos, name
-        assert all(set(EXIT_GRID) <= set(c) for c in combos)
+        needed = set(EXIT_GRID) if REGISTRY[name].use_exit_grid else set(REGISTRY[name].exit_param_keys)
+        assert all(needed <= set(c) for c in combos)
         assert all(REGISTRY[name].valid_params(c) for c in combos)
         assert len({tuple(sorted(c.items())) for c in combos}) == len(combos)
 

@@ -1,5 +1,6 @@
 from ..config import AiConfig, DaytradingConfig, StrategyConfig
 from .base import EXIT_GRID, Strategy
+from .anchored_vwap import AnchoredVwapSignalStrategy
 from .bollinger import BollingerReversionStrategy
 from .claude_advisor import ClaudeAdvisorStrategy
 from .donchian import DonchianStrategy
@@ -7,10 +8,12 @@ from .ensemble import EnsembleStrategy
 from .ema_cross import EmaCrossStrategy
 from .lux import ReversalZonesStrategy, SuperTrendAIStrategy
 from .macd_trend import MacdTrendStrategy
+from .pdh_pdl_sweep import PdhPdlSweepFadeStrategy
 from .opening_range import OpeningRangeBreakoutStrategy
 from .rsi_reversion import RsiReversionStrategy
 from .smc import SmartMoneyStrategy
 from .tsmom import TimeSeriesMomentumStrategy
+from .trend_signals import TrendSignalsStrategy
 from .vwap_reversion import VwapReversionStrategy
 
 # Backtestbare Strategien: nehmen am Vergleich teil.
@@ -18,7 +21,8 @@ REGISTRY: dict[str, type[Strategy]] = {
     cls.name: cls
     for cls in (EmaCrossStrategy, DonchianStrategy, RsiReversionStrategy, BollingerReversionStrategy, MacdTrendStrategy,
                 VwapReversionStrategy, OpeningRangeBreakoutStrategy, TimeSeriesMomentumStrategy, SmartMoneyStrategy,
-                SuperTrendAIStrategy, ReversalZonesStrategy, EnsembleStrategy)
+                SuperTrendAIStrategy, ReversalZonesStrategy, PdhPdlSweepFadeStrategy, AnchoredVwapSignalStrategy,
+                TrendSignalsStrategy, EnsembleStrategy)
 }
 
 # Nur fuer Papier- und Live-Handel, nicht backtestbar.

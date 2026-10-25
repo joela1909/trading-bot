@@ -201,8 +201,8 @@ def current(settings: Settings, has_override: bool | None = None, market: str = 
         },
         "options": {
             "timeframes": list(TIMEFRAMES),
-            "strategies": sorted(REGISTRY),
-            "members": sorted(n for n in REGISTRY if n != "ensemble"),
+            "strategies": sorted(n for n, c in REGISTRY.items() if not c.backtest_only),
+            "members": sorted(n for n, c in REGISTRY.items() if n != "ensemble" and not c.backtest_only),
             "own_exits": sorted(n for n, c in REGISTRY.items() if c.own_exits),
             "symbols": SUGGESTED_STOCKS if stocks else SUGGESTED_SYMBOLS,
             "symbol_kind": "ticker" if stocks else "pair",

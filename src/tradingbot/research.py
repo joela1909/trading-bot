@@ -44,14 +44,15 @@ def is_robust(o: "StrategyOutcome") -> bool:
 
 def expand_grid(strategy_name: str) -> list[dict]:
     cls = REGISTRY[strategy_name]
-    grid = {**cls.param_grid, **EXIT_GRID}
+    grid = {**cls.param_grid, **(EXIT_GRID if cls.use_exit_grid else {})}
     keys = list(grid)
     combos = [dict(zip(keys, values)) for values in itertools.product(*(grid[k] for k in keys))]
     return [c for c in combos if cls.valid_params(c)]
 
 
 def _indicator_key(strategy_name: str, params: dict) -> tuple:
-    return tuple(sorted((k, v) for k, v in params.items() if k not in EXIT_GRID))
+    exit_keys = REGISTRY[strategy_name].exit_param_keys
+    return tuple(sorted((k, v) for k, v in params.items() if k not in exit_keys))
 
 
 @dataclass

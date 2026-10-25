@@ -11,7 +11,9 @@ from .base import Strategy
 # Strategien, die ein Ensemble standardmaessig fragt: alles im REGISTRY ausser dem Ensemble selbst und tsmom
 # (fuer hoehere Zeitrahmen gedacht; ueber `members` trotzdem waehlbar).
 EXCLUDED = ("ensemble",)
-NOT_BY_DEFAULT = ("tsmom", "smc", "supertrend_ai", "reversal_zones")
+NOT_BY_DEFAULT = ("tsmom", "smc", "supertrend_ai", "reversal_zones", "pdh_pdl_sweep", "anchored_vwap", "trend_signals")
+# nur im Backtest ausfuehrbar, nie im Ensemble
+EXCLUDED += ("anchored_vwap",)
 
 
 class EnsembleStrategy(Strategy):

@@ -36,6 +36,14 @@ class Strategy(ABC):
     param_grid: dict[str, list] = {}
     # Linien fuer die Marktansicht im Dashboard: (Spalte, Beschriftung, Stil main|long|short|trend)
     chart_lines: list[tuple[str, str, str]] = []
+    # Strategien mit eigenen Stop- und Zielkursen je Trade (statt ATR-Vielfachen aus der Konfiguration):
+    entry_on_next_open = False  # Signal bei Kerzenschluss, Einstieg zur Eroeffnung der naechsten Kerze
+    fixed_levels = False  # entry_levels() liefert absolute Kurse, der Trailing-Stop ist aus
+    exit_on_next_open = False  # Ausstiegssignal bei Kerzenschluss, Ausstieg zur Eroeffnung der naechsten Kerze
+    backtest_only = False  # der Live-Bot kann diese Strategie noch nicht ausfuehren
+    levels_from_fill = False  # Abstaende vom Fill-Kurs statt absolute Kurse der Signalkerze verwenden
+    use_exit_grid = True  # False: die Stop-/Ziel-Parameter der Strategie ersetzen EXIT_GRID im Vergleich
+    exit_param_keys: tuple = tuple(EXIT_GRID)  # Parameter, die nur die Stop-/Zielkurse beeinflussen, nicht die Signale
 
     def __init__(self, cfg: StrategyConfig, session: DaytradingConfig | None = None, timeframe: str | None = None):
         # eigene Stop- und Zielwerte dieser Strategie (strategy.exits.<name>) haben Vorrang
@@ -87,6 +95,21 @@ class Strategy(ABC):
         short, cover = self.short_signals(df)
         return buy, sell, short, cover
 
+    def attempt_rule(self) -> dict | None:
+        """Optional: Tagesversuche, die vom Ergebnis abhaengen: {'stop_after_first_win': bool, 'additional_attempts': int}.
+        Der Tag ergibt sich aus day_keys(). Nach dem ersten abgeschlossenen Trade des Tages sind weitere Trades nur nach einem
+        Verlust und nur bis zur Obergrenze erlaubt."""
+        return None
+
+    def day_keys(self, df: pd.DataFrame) -> np.ndarray | None:
+        """Optional: Tages-Schluessel je Kerze fuer attempt_rule."""
+        return None
+
+    def entry_levels(self, df: pd.DataFrame) -> tuple | None:
+        """Optional: absolute (long_stop, long_ziel, short_stop, short_ziel) je Signalkerze, NaN = kein Ziel.
+        Bezug ist der Schlusskurs der Signalkerze. Nur fuer Strategien mit fixed_levels."""
+        return None
+
     def prepare(self, df: pd.DataFrame) -> pd.DataFrame:
         out = df.copy()
         out["atr"] = atr(out, self.cfg.atr_period)
@@ -94,6 +117,25 @@ class Strategy(ABC):
         return out
 
     def decide(self, df: pd.DataFrame, i: int = -1, context: dict | None = None) -> Decision:
+        d = self._decide(df, i, context)
+        if self.fixed_levels and d.signal in (Signal.BUY, Signal.SHORT):
+            d = self._apply_levels(d, df, i)
+        return d
+
+    def _apply_levels(self, d: Decision, df: pd.DataFrame, i: int) -> Decision:
+        """Live: Stop und Ziel aus den Strategie-Levels statt aus den ATR-Vielfachen der Konfiguration."""
+        idx = i if i >= 0 else len(df) + i
+        ls, lt, ss, st = (x[idx] for x in self.entry_levels(df))
+        long = d.signal == Signal.BUY
+        stop, tp = (ls, lt) if long else (ss, st)
+        close = float(df["close"].iloc[idx])
+        bad = stop != stop or (stop >= close if long else stop <= close)
+        if bad or (tp == tp and (tp <= close if long else tp >= close)):
+            return Decision(Signal.HOLD, "Stop oder Ziel ungueltig", atr=d.atr)
+        d.stop_loss, d.take_profit = float(stop), (float(tp) if tp == tp else None)
+        return d
+
+    def _decide(self, df: pd.DataFrame, i: int = -1, context: dict | None = None) -> Decision:
         n = len(df)
         if n < 2:
             return Decision(Signal.HOLD, "zu wenig Daten")

@@ -244,6 +244,65 @@ Der Befehl prüft jede Strategie auf zwei Fehlerquellen, die Backtests unbemerkt
 dazukommen, und Abweichungen zwischen dem Backtest und dem Live-Bot, der nur die letzten Kerzen sieht. `tradingbot compare` führt die Prüfung
 automatisch aus und schließt auffällige Strategien aus.
 
+## Wie oft sind sich die Strategien einig?
+
+```bash
+tradingbot overlap --symbols BTC/USDT,ETH/USDT,SOL/USDT --since 2021-01-01
+```
+
+Der Befehl lässt alle Strategien mit ihren Standardparametern im Backtest laufen und zählt, wie oft sie gleichzeitig dasselbe tun: dieselbe Kerze, ein
+Zeitfenster von standardmäßig 6 Kerzen rückwärts, die Zahl der Strategien gleichzeitig in einer Position und die Übereinstimmung je Paar.
+Der Bericht landet in `reports/`. Verkaufssignale der Rückkehr-Strategien gelten, solange der Kurs über der Mittellinie liegt, und tauchen deshalb
+in fast jeder Kerze auf. Aussagekräftiger sind die Einstiege und die Zeit in der Position.
+
+## PDH/PDL Sweep Fade
+
+Strategie `pdh_pdl_sweep`: gegen gescheiterte Ausbrüche über das Hoch oder Tief des Vortags handeln. Bricht eine Kerze über das Vortageshoch,
+schließt aber wieder darunter und ist bearish, wird verkauft. Bricht sie unter das Vortagestief, schließt darüber und ist bullish, wird gekauft.
+Das Signal fällt beim Kerzenschluss, der Einstieg erfolgt zur Eröffnung der nächsten Kerze. Stop und Ziel sind feste Kurse je Trade, entweder
+Vielfache der Tages-ATR oder das Extrem der Signalkerze bzw. die Gegenlinie des Vortags. Die Short-Seite braucht `market: futures`.
+
+```bash
+tradingbot --config config.pdh-sweep.yaml backtest --csv daten_5m.csv --trades
+tradingbot --config config.pdh-sweep.yaml backtest --demo random --timeframe 5m
+```
+
+Einstiegsfenster und maximale Trades pro Tag kommen aus dem Abschnitt `daytrading`. Mit `levels_from_fill: true` werden Stop und Ziel vom tatsächlichen
+Fill aus gesetzt statt vom Schlusskurs der Signalkerze. Bei den Standardwerten (Stop 0,3, Ziel 0,1 Tages-ATR) liegt die Gewinnschwelle bei 75 Prozent
+Trefferquote, bevor Kosten abgezogen werden. Die Positionsgröße kommt wie bei allen Strategien aus dem Risikomanagement, nicht aus einer festen Kontraktzahl.
+
+## Daily Anchored VWAP Signal Strategy
+
+Strategie `anchored_vwap`: Der VWAP beginnt jeden Tag um Mitternacht New Yorker Zeit neu und wird gegen einen EMA gestellt. Eine Zustandsmaschine pro
+Tag liefert vier Marker: grüner Punkt für den Long-Einstieg, roter Punkt für den Short-Einstieg, grünes Dreieck zum Schließen eines Longs und rotes
+Dreieck zum Schließen eines Shorts. Signale gibt es nur im Handelsfenster, standardmäßig 9:30 bis 16:00 Uhr New Yorker Zeit. Einstieg und Ausstieg
+erfolgen zur Eröffnung der Kerze nach dem Marker, der Stop liegt bei x ATR vom Schlusskurs der Signalkerze. Ein Filter für die relative ATR blockiert
+Einstiege bei zu hoher Schwankung. Nach dem ersten abgeschlossenen Trade des Tages sind weitere Trades nur nach einem Verlust erlaubt, höchstens
+`additional_attempts`, und ein Gewinn beendet den Tag.
+
+```bash
+tradingbot --config config.anchored-vwap.yaml backtest --csv daten_5m.csv --trades
+```
+
+Die Strategie läuft bisher nur im Backtest. `tradingbot run` lehnt sie ab, weil die ergebnisabhängigen Tagesversuche im Live-Bot noch fehlen.
+Die Option `use_atr_stop: false` wird nicht unterstützt, weil die Positionsgröße den Stop braucht. Die Positionsgröße kommt aus dem Risikomanagement
+und nicht aus einer festen Kontraktzahl. Das Handelsfenster und der Tagesbeginn beziehen sich auf die Eröffnungszeit der Kerze.
+
+## Trendsignale mit Bestätigung und Ausstieg
+
+Strategie `trend_signals`: ein eigener, offener Nachbau der Funktionen, die ein verbreiteter Signal-Indikator anbietet. Er ist keine Kopie eines
+fremden Codes und liefert andere Signale als dieser. Die Bausteine sind allgemein bekannte Verfahren:
+
+- **Trendlinie:** eine ATR-Linie, die nur in Trendrichtung nachzieht. Schließt der Kurs darunter oder darüber, dreht der Trend und es entsteht ein Signal
+  (`trail_atr_mult`, `trail_atr_length`). Der Ausstieg erfolgt bei jeder Gegendrehung.
+- **Filter für Einstiege:** Trendstärke über ADX (`adx_min`), Lage zu einem langsamen EMA (`confirm_ema`), relative Volatilität (`max_relative_atr`),
+  kein Einstieg im Squeeze (`block_squeeze`) und eine Mindest-Qualität von 0 bis 4 (`min_quality`). Die Qualität zählt offen nachvollziehbar:
+  ADX stark, Kurs richtig zum EMA, Volumen über dem Schnitt, kein Squeeze.
+- **Gegenbewegungs-Modus** (`mode: 1`): Einstieg gegen den Trend bei einem Ausreißer über das Bollinger-Band mit extremem RSI, Ausstieg an der Mittellinie.
+- Stop-Loss, Take-Profit und Positionsgröße kommen aus den üblichen Einstellungen des Bots.
+
+Es gibt keinen Ersatz für die KI-Bewertung des Originals. Die Strategie ist im Vergleich mit den anderen dabei und läuft auch im Papier- und Live-Handel.
+
 ## Schutzmechanismen
 
 In der `config.yaml` unter `protections`. Sie gelten im Papier- und Live-Handel und im Backtest.
@@ -469,6 +528,7 @@ src/tradingbot/
 ├── backtest.py       Backtester mit Kennzahlen, auch für Teilzeiträume
 ├── research.py       Strategievergleich mit Auswahl- und Prüfzeitraum
 ├── analysis.py       Prüfung auf Blick in die Zukunft und Live-Abweichung
+├── overlap.py        Wie oft Strategien gleichzeitig einer Meinung sind
 ├── ai.py             Anbindung an Claude für den KI-Bot
 ├── protections.py    Abkühlphase, Stop-Loss-Serie, Drawdown-Grenze
 ├── synthetic.py      Künstliche Kursreihen zum Testen des Werkzeugs

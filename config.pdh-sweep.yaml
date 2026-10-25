@@ -1,0 +1,41 @@
+# PDH/PDL Sweep Fade: gegen gescheiterte Ausbrueche ueber das Hoch oder Tief des Vortags handeln.
+# Backtest: tradingbot --config config.pdh-sweep.yaml backtest --csv daten.csv --trades
+# Die Parameter entsprechen den Standardwerten der Original-Strategie.
+
+exchange: bitget
+market: futures            # Short-Seite (Ausbruch ueber das Vortageshoch) geht nur mit Futures
+symbols: [BTC/USDT]
+quote_currency: USDT
+timeframe: 5m
+
+futures:
+  leverage: 1
+
+strategy:
+  name: pdh_pdl_sweep
+  allow_short: true
+  allow_long: true
+  trailing_stop: false       # feste Stop- und Zielkurse je Trade
+  tz: America/New_York       # Kalendertag, der den Vortag definiert
+  prior_day_rth_only: false  # true: nur 09:30-16:00 New Yorker Zeit zaehlt fuer Hoch und Tief des Vortags
+  require_engulf: false      # Signalkerze muss die vorherige Kerze umschliessen
+  engulf_full_range: false   # true: die ganze Spanne muss umschlossen werden, nicht nur der Kerzenkoerper
+  sl_mode: 1                 # 0 = Extrem der Signalkerze, 1 = Vielfaches der Tages-ATR
+  sl_atr_mult: 0.3
+  tp_mode: 1                 # 0 = gegenueberliegende Vortageslinie, 1 = Vielfaches der Tages-ATR
+  tp_atr_mult: 0.1
+  daily_atr_period: 14
+  levels_from_fill: false    # true: Stop und Ziel mit dem Abstand zum tatsaechlichen Fill setzen statt zum Schlusskurs
+
+daytrading:
+  enabled: true
+  timezone: America/New_York
+  entry_start: "09:45"       # erste Einstiege
+  entry_end: "13:00"         # letzte Einstiege
+  flat_time: "24:00"         # kein erzwungenes Schliessen vor Mitternacht
+  max_trades_per_day: 1
+
+paper:
+  starting_balance: 10000.0
+  fee_pct: 0.1
+  slippage_pct: 0.05

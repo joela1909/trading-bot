@@ -1,0 +1,32 @@
+# Daily Anchored VWAP Signal Strategy: VWAP seit Mitternacht New Yorker Zeit gegen einen EMA, mit Zustandsmaschine pro Tag.
+# Bisher nur im Backtest: tradingbot --config config.anchored-vwap.yaml backtest --csv daten_5m.csv --trades
+
+exchange: bitget
+market: futures            # Short-Seite (roter Punkt) geht nur mit Futures
+symbols: [BTC/USDT]
+quote_currency: USDT
+timeframe: 5m
+
+futures:
+  leverage: 1
+
+strategy:
+  name: anchored_vwap
+  allow_short: true
+  trailing_stop: false
+  tz: America/New_York             # Zeitzone fuer Tagesbeginn des VWAP und Handelsfenster
+  use_typical_price: true          # VWAP mit (Hoch + Tief + Schluss) / 3, sonst mit dem Schlusskurs
+  session_start_hhmm: 930          # Signale nur zwischen Beginn und Ende (HHMM, New Yorker Zeit)
+  session_end_hhmm: 1600
+  ema_length: 20
+  atr_period: 14
+  atr_stop_multiplier: 2.0         # Stop = Schlusskurs der Signalkerze -/+ x ATR
+  use_relative_volatility_filter: true
+  baseline_atr_period: 50
+  max_relative_atr: 1.2            # kein Einstieg, wenn ATR / Basis-ATR darueber liegt
+  additional_attempts: 2           # nach einem Verlust am Tag: so viele weitere Trades; nach einem Gewinn ist der Tag beendet
+
+paper:
+  starting_balance: 10000.0
+  fee_pct: 0.1
+  slippage_pct: 0.05
