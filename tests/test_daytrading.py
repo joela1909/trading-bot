@@ -72,13 +72,15 @@ def test_session_vwap_resets_each_day():
 
 
 def test_opening_range_never_buys_before_range_is_complete():
-    strat = build_strategy(StrategyConfig(name="opening_range", orb_minutes=60), session=_dt())
+    # Eigene Startzeit der Spanne (unabhaengig von den Handelszeiten): 08:00 UTC, 60 Minuten
+    strat = build_strategy(StrategyConfig(name="opening_range", orb_minutes=60, orb_start="08:00", orb_timezone="UTC"), session=_dt())
     df = strat.prepare(make_series("trend", 4000, 11, tf_ms=TF15))
     buy, _ = strat.signals(df)
     assert buy.any()
     open_ts = pd.to_datetime(df["timestamp"], unit="ms", utc=True)
     minute = (open_ts.dt.hour * 60 + open_ts.dt.minute).to_numpy()
-    assert (minute[buy] >= 9 * 60).all(), "Kauf erst nach Ende der Eroeffnungsspanne (08:00 + 60 min)"
+    in_range = (minute >= 8 * 60) & (minute < 9 * 60)
+    assert not (buy & in_range).any(), "kein Kauf, solange die Spanne 08:00-09:00 noch laeuft"
 
 
 @pytest.mark.parametrize("name", ["vwap_reversion", "opening_range"])
@@ -189,3 +191,27 @@ def test_startup_message_mentions_daytrading(settings, tmp_path):
     bot.stop()
     bot.run_forever()
     assert any("Tageshandel 08:00-20:00" in m for m in notifier.messages)
+
+
+# ------------------------------------------------------------------ Rund um die Uhr
+def test_around_the_clock_closes_only_at_midnight():
+    s = Session(DaytradingConfig(enabled=True, timezone="Europe/Berlin", entry_start="00:00", entry_end="23:50", flat_time="24:00"))
+    opened = datetime(2026, 10, 21, 21, 0, tzinfo=UTC)  # 23:00 in Berlin
+    assert s.entry_allowed(datetime(2026, 10, 21, 1, 0, tzinfo=UTC))  # 03:00 nachts
+    assert not s.entry_allowed(datetime(2026, 10, 21, 21, 55, tzinfo=UTC))  # 23:55
+    assert s.must_close(datetime(2026, 10, 21, 21, 59, tzinfo=UTC), opened) is None  # 23:59
+    assert s.must_close(datetime(2026, 10, 21, 22, 0, tzinfo=UTC), opened) == "session_end"  # Mitternacht
+
+
+def test_project_config_trades_around_the_clock():
+    from tradingbot.config import load_settings
+
+    dt = load_settings("config.yaml", use_override=False).bot.daytrading
+    assert dt.entry_start == "00:00" and dt.flat_time == "24:00"
+
+
+def test_keep_awake_does_nothing_outside_windows(monkeypatch):
+    import tradingbot.keep_awake as ka
+
+    monkeypatch.setattr(ka.os, "name", "posix")
+    assert ka.keep_awake(True) is False

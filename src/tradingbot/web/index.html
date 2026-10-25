@@ -1,0 +1,232 @@
+<!doctype html>
+<html lang="de">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<meta name="theme-color" content="#f5f5f7" media="(prefers-color-scheme: light)">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
+<meta name="apple-mobile-web-app-title" content="Trading Bot">
+<title>Trading Bot</title>
+<link rel="manifest" href="/manifest.webmanifest">
+<link rel="icon" href="/static/icon.svg" type="image/svg+xml">
+<link rel="apple-touch-icon" href="/static/icon-180.png">
+<link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+<a class="skip" href="#main">Zum Inhalt</a>
+
+<header class="topbar">
+  <div class="segmented market-switch" id="market-switch" role="tablist" aria-label="Kategorie">
+    <button type="button" role="tab" data-market="crypto" aria-selected="true">Krypto</button>
+    <button type="button" role="tab" data-market="stocks" aria-selected="false">Aktien</button>
+  </div>
+  <span class="status"><span id="mode" class="badge">…</span><span id="run" class="dot" aria-hidden="true"></span><span id="run-text">verbinde …</span></span>
+</header>
+
+<nav class="nav" aria-label="Seiten">
+  <a href="#/uebersicht" data-nav="uebersicht"><svg viewBox="0 0 24 24" aria-hidden="true"><rect x="3.5" y="3.5" width="7" height="9" rx="2"/><rect x="13.5" y="3.5" width="7" height="5" rx="2"/><rect x="3.5" y="15.5" width="7" height="5" rx="2"/><rect x="13.5" y="11.5" width="7" height="9" rx="2"/></svg><span>Übersicht</span></a>
+  <a href="#/chart" data-nav="chart"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M3.5 17l5-5.5 4 3.5 8-9"/><path d="M3.5 20.5h17"/></svg><span>Chart</span></a>
+  <a href="#/trades" data-nav="trades"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 8h14l-3.5-3.5M20 16H6l3.5 3.5"/></svg><span>Trades</span></a>
+  <a href="#/strategien" data-nav="strategien"><svg viewBox="0 0 24 24" aria-hidden="true"><circle cx="12" cy="12" r="8.5"/><path d="M12 7.5v4.5l3 2"/></svg><span>Strategien</span></a>
+  <a href="#/einstellungen" data-nav="einstellungen"><svg viewBox="0 0 24 24" aria-hidden="true"><path d="M4 7h9M17 7h3M4 17h3M11 17h9"/><circle cx="15" cy="7" r="2"/><circle cx="9" cy="17" r="2"/></svg><span>Einstellungen</span></a>
+</nav>
+
+<main id="main" tabindex="-1">
+  <div id="banner" class="banner" role="status" hidden></div>
+
+  <!-- Aktien noch nicht eingerichtet: ersetzt Übersicht, Chart, Trades und Strategien -->
+  <section class="page" id="stocks-setup" aria-labelledby="h-setup" hidden>
+    <h1 id="h-setup" class="title">Aktien</h1>
+    <p class="lede">US-Aktien mit echten Kursen, gehandelt auf einem eigenen Papierkonto mit 10.000 USD. Es geht kein echtes Geld raus.</p>
+    <div class="card">
+      <p class="status-line" id="stocks-problem">Noch nicht eingerichtet.</p>
+      <ol class="steps">
+        <li>Auf <b>alpaca.markets</b> ein kostenloses Konto anlegen. Eine E-Mail-Adresse genügt.</li>
+        <li>Im Alpaca-Dashboard oben <b>Paper</b> wählen, dann unter <b>API Keys</b> auf <b>Generate</b> tippen.</li>
+        <li>Key und Secret auf dem PC im Ordner <b>cloudflare</b> hinterlegen:<br><code>npx wrangler secret put ALPACA_API_KEY</code><br><code>npx wrangler secret put ALPACA_API_SECRET</code></li>
+        <li>Neu deployen. Der Bot startet neu und handelt ab dann auch Aktien.</li>
+      </ol>
+    </div>
+    <p class="footnote">Die Einstellungen für Aktien kannst du schon vorher anpassen.</p>
+  </section>
+
+  <!-- Übersicht -->
+  <section class="page" data-page="uebersicht" aria-labelledby="h-uebersicht">
+    <h1 id="h-uebersicht" class="title">Übersicht</h1>
+    <div class="hero">
+      <p class="hero-label" id="hero-label">Kapital</p>
+      <p class="hero-value" id="hero-equity">–</p>
+      <div class="hero-stats" id="hero-stats"></div>
+      <div id="equity" class="equity" role="img" aria-label="Kapitalverlauf"></div>
+    </div>
+
+    <h2 class="group-title">Offene Positionen</h2>
+    <div class="list" id="positions"></div>
+
+    <h2 class="group-title">Märkte</h2>
+    <div class="list" id="coins"></div>
+    <p class="footnote">Punkte: Stimmen der Strategien. Blau für Long, Orange für Short.</p>
+
+    <div class="list">
+      <div class="row">
+        <span class="row-main"><span class="row-title">Neue Einstiege</span><span class="row-sub wrap">Offene Positionen schließt der Bot weiter.</span></span>
+        <button id="toggle" type="button" class="btn small">…</button>
+      </div>
+    </div>
+  </section>
+
+  <!-- Chart -->
+  <section class="page" data-page="chart" aria-labelledby="h-chart" hidden>
+    <h1 id="h-chart" class="title">Chart</h1>
+    <div class="pills" id="chart-coins" role="tablist" aria-label="Paar"></div>
+    <div class="card chart-card">
+      <div class="segmented wide" id="chart-tf" aria-label="Zeitrahmen der Kerzen"></div>
+      <div class="readout" id="readout" aria-live="off"></div>
+      <div id="chart" class="chart" role="img" aria-label="Kerzenchart mit Linien der Strategie und Trades"></div>
+      <div class="chips" id="chart-lines" aria-label="Linien ein- und ausblenden"></div>
+      <p class="footnote tight" id="chart-note" hidden></p>
+    </div>
+    <div class="card">
+      <p class="status-line" id="chart-status"></p>
+      <p class="footnote tight" id="chart-session"></p>
+      <ul class="reasons" id="chart-explain"></ul>
+    </div>
+    <h2 class="group-title" id="chart-trades-title">Trades</h2>
+    <div class="list" id="chart-trades"></div>
+    <p class="footnote">Tippen zeigt den Trade im Chart.</p>
+  </section>
+
+  <!-- Trades -->
+  <section class="page" data-page="trades" aria-labelledby="h-trades" hidden>
+    <h1 id="h-trades" class="title">Trades</h1>
+    <div class="segmented wide view-switch" id="trade-view" role="tablist" aria-label="Ansicht">
+      <button type="button" data-view="list" aria-pressed="true">Verlauf</button>
+      <button type="button" data-view="stats" aria-pressed="false">Statistik</button>
+    </div>
+    <div class="pills" id="trade-filter" aria-label="Paar filtern"></div>
+    <div id="trade-list-view">
+      <div class="stats" id="trade-figures"></div>
+      <div class="list" id="trade-list"></div>
+    </div>
+    <div id="trade-stats-view" hidden></div>
+  </section>
+
+  <!-- Strategien -->
+  <section class="page" data-page="strategien" aria-labelledby="h-strategien" hidden>
+    <h1 id="h-strategien" class="title">Strategien</h1>
+    <p class="lede" id="referee"></p>
+    <div id="votes-tables" class="groups"></div>
+  </section>
+
+  <!-- Einstellungen -->
+  <section class="page" data-page="einstellungen" aria-labelledby="h-einstellungen" hidden>
+    <h1 id="h-einstellungen" class="title">Einstellungen</h1>
+    <form id="settings" class="settings" novalidate>
+      <fieldset>
+        <legend class="group-title" id="s-symbols-title">Handelspaare</legend>
+        <div class="list padded">
+          <div class="toggles" id="s-symbols"></div>
+          <label class="row"><span>Weiteres Paar</span><input id="s-symbol-add" placeholder="AVAX/USDT" autocomplete="off" spellcheck="false" autocapitalize="characters"></label>
+        </div>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title">Strategie</legend>
+        <div class="list">
+          <label class="row"><span>Kerzen</span><select id="s-timeframe"></select></label>
+          <label class="row"><span>Strategie</span><select id="s-strategy"></select></label>
+          <div id="s-ensemble" class="sub-rows">
+            <label class="row"><span>Stimmen für Einstieg</span><input id="s-votes" type="number" inputmode="numeric" min="1" max="7" step="1"></label>
+            <label class="row"><span>Reicht allein</span><select id="s-solo"></select></label>
+            <p class="members-label">Diese Strategien stimmen mit</p>
+            <div class="toggles" id="s-members"></div>
+          </div>
+          <label class="row"><span>Short erlauben</span><input id="s-short" type="checkbox" class="switch"></label>
+          <label class="row"><span>Signale in Echtzeit</span><input id="s-realtime" type="checkbox" class="switch"></label>
+          <label class="row"><span>Signale aus Spot-Kursen</span><input id="s-spotsig" type="checkbox" class="switch"></label>
+          <label class="row"><span>SuperTrend: Kerzen</span><select id="s-sttf"><option value="">wie der Bot</option><option value="5m">5 Minuten</option><option value="15m">15 Minuten</option><option value="1h">1 Stunde</option></select></label>
+          <label class="row"><span>SuperTrend: Mindeststärke (1–4)</span><input id="s-ststr" type="number" inputmode="numeric" min="1" max="4" step="1"></label>
+          <label class="row"><span>Trendfilter: ADX mindestens</span><input id="s-stadx" type="number" inputmode="decimal" min="0" max="60" step="1" placeholder="aus"></label>
+          <label class="row"><span>Trendfilter: Choppiness höchstens</span><input id="s-stchop" type="number" inputmode="decimal" min="0" max="100" step="1" placeholder="aus"></label>
+          <label class="row"><span>Trendfilter: EMA (Kerzen)</span><input id="s-stema" type="number" inputmode="numeric" min="0" max="2000" step="10" placeholder="aus"></label>
+        </div>
+        <p class="footnote">„Reicht allein“: Gibt diese Strategie ein Signal, steigt der Bot ein. Die anderen können es nicht aufhalten.</p>
+        <p class="footnote">„Signale aus Spot-Kursen“: Signale und Chart wie auf TradingView mit dem Spot-Paar (z. B. SOLUSDT), gehandelt wird weiter auf Futures. Stops und Ziele prüft der Bot am Futures-Kurs, der wenige Cent abweichen kann.</p>
+        <p class="footnote">Trendfilter (nur SuperTrend AI, leer oder 0 = aus): Der Bot steigt nur ein, wenn der Markt klar läuft. ADX misst die Trendstärke (ab 25 gilt ein Trend als klar), Choppiness die Seitwärtsbewegung (über 60 seitwärts, unter 40 Trend). Mit EMA geht er Long nur über und Short nur unter dieser Linie. Ausstiege bleiben unverändert. „SuperTrend: Kerzen“ rechnet den Indikator auf größeren Kerzen: weniger Fehlsignale, der Stop liegt weiter weg, die Gebühren fallen im Verhältnis kleiner aus.</p>
+        <p class="footnote">„Signale in Echtzeit“: Der Bot handelt schon während der laufenden Kerze statt bei ihrem Schluss. Ein Signal kann bis zum Kerzenschluss wieder verschwinden, der Bot ist dann trotzdem eingestiegen. Höchstens ein Einstieg je Paar und Kerze. Backtests rechnen immer mit Kerzenschluss.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title">Stop-Loss und Ziel (Standard)</legend>
+        <div class="list">
+          <label class="row"><span>Stop (x ATR)</span><input id="s-stopmult" type="number" inputmode="decimal" min="0.5" max="20" step="0.5"></label>
+          <label class="row"><span>Stop mindestens (%)</span><input id="s-minstop" type="number" inputmode="decimal" min="0" max="20" step="0.1"></label>
+          <label class="row"><span>Ziel (x ATR)</span><input id="s-tpmult" type="number" inputmode="decimal" min="0" max="50" step="0.5"></label>
+          <label class="row"><span>Trailing-Abstand (%)</span><input id="s-trailpct" type="number" inputmode="decimal" min="0" max="20" step="0.1"></label>
+        </div>
+        <p class="footnote" id="s-stophint">Ziel 0 heißt: ohne Ziel. Der Trailing-Stop folgt dem besten Kurs, bei Long nur nach oben, bei Short nur nach unten. Trailing 0 heißt: gleicher Abstand wie der Stop.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title">Stop und Ziel je Strategie</legend>
+        <div class="list" id="s-exits"></div>
+        <p class="footnote">Leeres Feld heißt: Standard von oben. Gilt für die Strategie allein und im Ensemble, dort für Trades, die sie auslöst. Strategien mit Zone (Smart Money, Reversal Zones) setzen den Stop an die Zone, der Mindest-Stop gilt trotzdem.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title">Risiko</legend>
+        <div class="list">
+          <label class="row"><span>Hebel</span><span class="lev"><input id="s-lev-range" type="range" min="1" max="100" step="1" aria-label="Hebel"><input id="s-lev" type="number" inputmode="numeric" min="1" max="100" step="1"></span></label>
+          <label class="row"><span>Risiko je Trade (%)</span><input id="s-risk" type="number" inputmode="decimal" min="0.1" max="5" step="0.1"></label>
+          <label class="row"><span>Einsatz je Position (%)</span><input id="s-maxpos" type="number" inputmode="decimal" min="1" max="100" step="1"></label>
+          <label class="row"><span>Offene Positionen</span><input id="s-maxopen" type="number" inputmode="numeric" min="1" max="10" step="1"></label>
+          <label class="row"><span>Tagesverlust bis Stopp (%)</span><input id="s-dayloss" type="number" inputmode="decimal" min="0.5" max="20" step="0.5"></label>
+          <label class="row"><span>Sperre nach Stop-Loss-Serie</span><input id="s-slguard" type="checkbox" class="switch"></label>
+          <label class="row"><span>Abkühlphase nach Ausstieg</span><input id="s-cooldown" type="checkbox" class="switch"></label>
+          <label class="row"><span>Ziel mind. x Kosten</span><input id="s-costratio" type="number" inputmode="decimal" min="0" max="20" step="0.5" aria-describedby="s-costhint"></label>
+        </div>
+        <p class="footnote" id="s-levhint"></p>
+        <p class="footnote" id="s-costhint"></p>
+        <p class="footnote" id="s-slguardhint"></p>
+        <p class="footnote" id="s-cooldownhint"></p>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title" id="s-times-title">Handelszeiten</legend>
+        <div class="list">
+          <label class="row"><span>Nur innerhalb eines Tages</span><input id="s-dt" type="checkbox" class="switch"></label>
+          <label class="row"><span>Einstiege ab</span><input id="s-start" type="time"></label>
+          <label class="row"><span>Einstiege bis</span><input id="s-end" type="time"></label>
+          <label class="row"><span>Alles schließen um</span><input id="s-flat" placeholder="24:00" pattern="[0-2][0-9]:[0-5][0-9]" inputmode="numeric"></label>
+          <label class="row"><span>Einstiege pro Tag</span><input id="s-maxtrades" type="number" inputmode="numeric" min="0" max="100" step="1"></label>
+        </div>
+        <p class="footnote" id="s-times-hint">Einstiege pro Tag 0 heißt: unbegrenzt.</p>
+      </fieldset>
+
+      <fieldset>
+        <legend class="group-title">Papierkonto</legend>
+        <div class="list">
+          <label class="row"><span>Trade-Verlauf mitlöschen</span><input id="s-reset-trades" type="checkbox" class="switch"></label>
+          <div class="row"><span class="row-main"><span class="row-title">Auf Werkszustand</span><span class="row-sub wrap" id="s-account-hint">Kapital auf Startkapital, Kapitalverlauf, Tageslimit und Sperren zurück.</span></span>
+            <button type="button" class="btn small" id="s-account-reset">Zurücksetzen</button></div>
+        </div>
+        <p class="footnote">Offene Positionen schließt der Bot dabei zum aktuellen Kurs. Nur im Papierhandel.</p>
+      </fieldset>
+
+      <p class="footnote" id="s-locked"></p>
+      <p class="form-error" id="s-error" role="alert" hidden></p>
+      <div class="actions">
+        <button type="submit" class="btn primary" id="s-save">Speichern und neu starten</button>
+        <button type="button" class="btn plain" id="s-reset" hidden>Auf config.yaml zurücksetzen</button>
+        <a class="btn plain" href="/logout">Abmelden</a>
+      </div>
+    </form>
+  </section>
+</main>
+
+<script src="/static/vendor/lightweight-charts.standalone.production.js"></script>
+<script src="/static/app.js"></script>
+</body>
+</html>

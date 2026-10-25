@@ -22,7 +22,10 @@ timeframe: 1m
 
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
-poll_interval_seconds: 15
+poll_interval_seconds: 5      # so oft prueft der Bot Kurse, Stops und Ziele (Kerzen werden zwischengespeichert)
+
+# Windows: Ruhemodus verhindern, solange der Bot laeuft (aendert keine Einstellung, endet mit dem Bot)
+keep_awake: true
 
 # Verzeichnis fuer Zustand (offene Positionen, Trade-Historie) und Logs
 state_dir: state
@@ -30,7 +33,7 @@ log_dir: logs
 
 paper:
   starting_balance: 1000.0   # in Quote-Waehrung
-  fee_pct: 0.05              # Gebuehr pro Order in Prozent (Binance-Futures, Taker, Standardstufe)
+  fee_pct: 0.06              # Gebuehr pro Order in Prozent (Bitget USDT-M-Futures, Taker, VIP 0; Binance waere 0,05)
   slippage_pct: 0.05         # angenommene Kursabweichung bei Market-Orders in Prozent
 
 # Futures: Hebel 1 heisst kein zusaetzliches Risiko durch Hebel. Die Sicherheit je Position ist Nennwert / Hebel.
@@ -39,22 +42,54 @@ futures:
   margin_mode: isolated
 
 strategy:
-  # Tageshandel: vwap_reversion | opening_range
-  # Ohne Tageshandel gedacht, laufen aber auch damit: ema_cross | donchian | macd_trend | rsi_reversion | bollinger_reversion
+  # ensemble: alle Strategien gleichzeitig, ein Schiedsrichter entscheidet nach Stimmen (Standard)
+  # einzeln: vwap_reversion | opening_range | ema_cross | donchian | macd_trend | rsi_reversion | bollinger_reversion
   # KI: claude_advisor (siehe config.bitget-ki.yaml, kann noch nicht shorten)
-  name: vwap_reversion
+  # In der App unter Einstellungen aenderbar, die App-Fassung hat dann Vorrang.
+  name: ensemble
+  min_votes: 3               # ensemble: Einstieg ab so vielen Strategien in dieselbe Richtung (Backtest 1m: 3 am besten)
+  solo_member: opening_range # ensemble: Signal dieser Strategie reicht allein, die anderen koennen es nicht aufhalten (leer = nur Mehrheit)
   allow_short: true          # Short-Positionen eroeffnen (nur mit market: futures)
   vwap_dev_atr: 3.0          # vwap_reversion: Einstieg, wenn der Kurs so viele ATR unter (Long) bzw. ueber (Short) dem Tages-VWAP liegt
-  orb_minutes: 60            # opening_range: Laenge der Eroeffnungsspanne ab entry_start
+  orb_minutes: 30            # opening_range (nach LuxAlgo): Laenge der Eroeffnungsspanne in Minuten
+  orb_sessions:              # ... Eroeffnungen: Europa (Xetra/Euronext 09:00 Berlin), dann USA (NYSE 09:30 New York = 15:30 Berlin)
+    - "09:00 Europe/Berlin"  #     jede neue Spanne loest die vorige ab, die US-Spanne gilt bis zum naechsten Morgen
+    - "09:30 America/New_York"
+  orb_weekdays: true         # ... Spannen nur an Boersentagen (Mo-Fr), am Wochenende gilt die vom Freitag weiter
+  orb_bias: false            # true = gegen die Tagesrichtung erst ab Ziel 1 einsteigen
+  st_sensitivity: 5         # supertrend_ai (LuxAlgo): Signal Sensitivity wie auf TradingView
+  st_atr_len: 25             # ... Signal Tuner
+  st_timeframe: 15m          # ... auf 15m-Kerzen rechnen (Backtest 21 Tage: 1m -99 %, 15m mit Trendfilter +14 %); weg = Zeitrahmen des Bots
+  st_adx_min: 30             # ... Trendfilter: Einstieg nur bei ADX(14) >= 30 (klarer Trend, keine Seitwaertsphase)
+  st_trend_ema: 200          # ... Long nur ueber, Short nur unter der EMA 200 (Bot-Kerzen)
+  # st_chop_max: 50          # ... optional: Choppiness(14) hoechstens 50
+  # st_min_stop_pct: 0.5     # ... optional: Linie (Stop) mindestens 0,5 % vom Kurs
+  st_min_strength: 1         # ... alle Signale (1-4 ist nur die Anzeige der Staerke)
   trend_ema: 200             # 0 = aus, sonst Long nur ueber und Short nur unter dieser EMA
   fast_ema: 20
   slow_ema: 50
   rsi_period: 14
   rsi_max_entry: 70          # kein Long, wenn der Markt bereits ueberkauft ist (Short gespiegelt: nicht unter 30)
   atr_period: 14
-  stop_atr_mult: 3.0         # Stop-Loss = 3 * ATR gegen die Position (Long darunter, Short darueber)
+  stop_atr_mult: 2.0         # Stop-Loss = 2 * ATR gegen die Position (Long darunter, Short darueber)
+  min_stop_pct: 0.5          # ... aber mindestens 0,5 % vom Kurs. Bei 1m-Kerzen ist 2 * ATR oft nur 0,1 %, das loest normales Rauschen aus
   take_profit_atr_mult: 4.0  # Take-Profit = 4 * ATR in Richtung der Position (0 = deaktiviert)
   trailing_stop: true        # Stop-Loss zieht nach, wenn der Kurs in Richtung der Position laeuft
+  trailing_pct: 1.0          # ... mit festem Abstand von 1 % zum besten Kurs, nur in Richtung der Position (0 = Abstand wie der Stop)
+  # Stop und Ziel je Strategie (allein und im Ensemble). Fehlende Werte: die drei Zeilen oben.
+  # Kosten hin und zurueck 0,2 %, der Kostenfilter (2 x) verlangt also mind. 0,4 % Ziel.
+  # supertrend_ai setzt Stop (Linie) und Ausstieg (Linie, X-Marke) selbst, ohne festes Ziel und ohne Kostenfilter.
+  exits:
+    ema_cross:           {stop_atr_mult: 2.0, take_profit_atr_mult: 4.0, min_stop_pct: 0.5}  # Trend: Ziel 2 x Stop
+    macd_trend:          {stop_atr_mult: 2.0, take_profit_atr_mult: 4.0, min_stop_pct: 0.5}
+    donchian:            {stop_atr_mult: 2.0, take_profit_atr_mult: 6.0, min_stop_pct: 0.5}  # Ausbruch: Ziel 3 x Stop
+    tsmom:               {stop_atr_mult: 2.5, take_profit_atr_mult: 6.0, min_stop_pct: 0.6}
+    opening_range:       {stop_atr_mult: 2.0, take_profit_atr_mult: 4.0, min_stop_pct: 0.5}
+    rsi_reversion:       {stop_atr_mult: 1.5, take_profit_atr_mult: 2.0, min_stop_pct: 0.4}  # Rueckkehr: engeres Ziel
+    bollinger_reversion: {stop_atr_mult: 1.5, take_profit_atr_mult: 2.0, min_stop_pct: 0.4}
+    vwap_reversion:      {stop_atr_mult: 1.5, take_profit_atr_mult: 2.0, min_stop_pct: 0.4}
+    smc:                 {stop_atr_mult: 2.0, take_profit_atr_mult: 4.0, min_stop_pct: 0.4}  # Stop an der Zone, Ziel 2 x Risiko
+    reversal_zones:      {stop_atr_mult: 2.0, take_profit_atr_mult: 3.0, min_stop_pct: 0.5}  # Stop am Zonenrand
 
 risk:
   risk_per_trade_pct: 1.0    # max. Verlust pro Trade (Abstand zum Stop) in % des Kapitals
@@ -62,6 +97,7 @@ risk:
   max_open_positions: 3
   max_daily_loss_pct: 3.0    # ab diesem Tagesverlust keine neuen Einstiege mehr bis zum naechsten Tag
   min_order_quote: 10.0      # kleinere Orders werden nicht platziert (BTC-Futures verlangen mind. 50 USDT)
+  min_target_cost_ratio: 2.0 # kein Einstieg, wenn das Ziel kleiner ist als 2 x die Kosten hin und zurueck
 
 # Schutzmechanismen, gezaehlt in Kerzen. Bei 1m-Kerzen entsprechend mehr Kerzen.
 protections:
@@ -72,13 +108,15 @@ protections:
   max_drawdown_pct: 20.0
   max_drawdown_lock_candles: 240    # 4 Stunden Sperre nach zu grossem Drawdown
 
-# Tageshandel: keine Position ueber Nacht. Uhrzeiten in der angegebenen Zeitzone.
+# Tageshandel rund um die Uhr: Einstiege den ganzen Tag, um Mitternacht wird alles geschlossen und der Handelstag
+# (Einstiege pro Tag, Tagesverlustlimit) beginnt neu. Uhrzeiten in der angegebenen Zeitzone.
+# Nur tagsueber handeln: z. B. entry_start "08:00", entry_end "21:30", flat_time "22:00".
 daytrading:
   enabled: true
   timezone: Europe/Berlin
-  entry_start: "08:00"       # ab hier neue Einstiege (auch Beginn der Eroeffnungsspanne)
-  entry_end: "21:30"         # danach keine neuen Einstiege mehr
-  flat_time: "22:00"         # ab hier werden alle offenen Positionen geschlossen
+  entry_start: "00:00"       # ab hier neue Einstiege (auch Beginn der Eroeffnungsspanne)
+  entry_end: "23:50"         # danach keine neuen Einstiege mehr
+  flat_time: "24:00"         # ab hier werden alle offenen Positionen geschlossen (24:00 = Mitternacht)
   max_trades_per_day: 6      # max. Einstiege pro Tag ueber alle Coins (0 = unbegrenzt)
   max_hold_minutes: 0        # max. Haltedauer je Position in Minuten (0 = nur flat_time)
 
@@ -90,3 +128,28 @@ notifications:
 dashboard:
   enabled: true
   port: 8765
+
+# US-Aktien im Papierhandel, als zweiter Bot neben Krypto (App: Tab "Aktien").
+# Kurse von Alpaca: kostenloses Papierkonto auf https://alpaca.markets (nur E-Mail), dort "Paper" -> API Keys erzeugen.
+# Schluessel in .env: ALPACA_API_KEY und ALPACA_API_SECRET (Cloudflare: npx wrangler secret put ALPACA_API_KEY ...).
+# Ohne Schluessel laeuft nur der Krypto-Bot. Gehandelt wird auf einem eigenen Papierkonto, Orders gehen nie raus.
+stocks:
+  enabled: true
+  data_feed: iex             # iex: kostenlos in Echtzeit (eine US-Boerse), sip: alle Boersen (Alpaca-Abo)
+  symbols: [AAPL, MSFT, NVDA, TSLA, AMZN, META, SPY, QQQ]
+  timeframe: 5m              # 1m-Kerzen sind bei IEX lueckenhaft, 5m ist stabil
+  poll_interval_seconds: 15  # kostenlos 200 Anfragen pro Minute
+  starting_balance: 10000    # USD
+  fee_pct: 0.0               # Alpaca: keine Kommission
+  slippage_pct: 0.02
+  allow_short: true
+  strategy:                  # Abweichungen von strategy oben
+    orb_sessions: ["09:30 America/New_York"]
+    orb_weekdays: true
+  daytrading:                # Regulaere Handelszeit New York, nichts ueber Nacht
+    enabled: true
+    timezone: America/New_York
+    entry_start: "10:00"
+    entry_end: "15:45"
+    flat_time: "15:55"
+    max_trades_per_day: 6

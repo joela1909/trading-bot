@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+import re
+
 from pathlib import Path
 from typing import Literal
 
@@ -17,6 +19,14 @@ class PaperConfig(BaseModel):
     slippage_pct: float = 0.05
 
 
+class ExitOverride(BaseModel):
+    """Stop und Ziel fuer eine einzelne Strategie. Leer (None) = Wert aus dem Strategie-Abschnitt."""
+
+    stop_atr_mult: float | None = Field(default=None, ge=0.5, le=20.0)
+    take_profit_atr_mult: float | None = Field(default=None, ge=0.0, le=50.0)
+    min_stop_pct: float | None = Field(default=None, ge=0.0, le=20.0)
+
+
 class StrategyConfig(BaseModel):
     model_config = ConfigDict(extra="allow")
 
@@ -28,7 +38,22 @@ class StrategyConfig(BaseModel):
     atr_period: int = 14
     stop_atr_mult: float = 2.0
     take_profit_atr_mult: float = 4.0
+    # Stop mindestens so viele Prozent vom Kurs entfernt, auch wenn stop_atr_mult x ATR kleiner ist (0 = aus).
+    # Das Ziel waechst dann im selben Verhaeltnis mit (take_profit_atr_mult / stop_atr_mult bleibt gleich).
+    min_stop_pct: float = Field(default=0.0, ge=0.0, le=20.0)
     trailing_stop: bool = True
+    # Trailing-Stop mit festem Abstand in % vom besten Kurs seit Einstieg (0 = wie der Stop: ATR bzw. min_stop_pct).
+    # Er wandert nur in Richtung der Position: bei Long nur nach oben, bei Short nur nach unten.
+    trailing_pct: float = Field(default=0.0, ge=0.0, le=20.0)
+    # Echtzeit: Signale auf der noch laufenden Kerze, Ein- und Ausstieg sofort (sonst erst beim Kerzenschluss).
+    # Ein Signal kann bis zum Kerzenschluss wieder verschwinden. Der Backtest rechnet immer mit Kerzenschluss.
+    realtime_signals: bool = False
+    # Woher die Kerzen fuer Signale und Chart kommen: "market" = Handelsmarkt (z. B. Futures), "spot" = Spot-Paar.
+    # Gehandelt wird immer auf dem eingestellten Markt; Stops und Ziele pruefen den Kurs des Handelsmarkts.
+    signal_source: Literal["market", "spot"] = "market"
+    # Stop und Ziel je Strategie, z. B. {"rsi_reversion": {"stop_atr_mult": 1.5, "take_profit_atr_mult": 2}}.
+    # Gilt fuer die Strategie allein und als Mitglied im Ensemble; fehlende Werte kommen von oben.
+    exits: dict[str, ExitOverride] = Field(default_factory=dict)
     allow_short: bool = False  # Short-Positionen, nur mit market: futures
 
     @field_validator("slow_ema")
@@ -46,6 +71,9 @@ class RiskConfig(BaseModel):
     max_open_positions: int = 3
     max_daily_loss_pct: float = 3.0
     min_order_quote: float = 10.0
+    # Kein Einstieg, wenn das Ziel (Take-Profit, ohne Take-Profit der Stop-Abstand) kleiner ist als dieses Vielfache
+    # der Handelskosten hin und zurueck (2 x Gebuehr + 2 x Kursabweichung). 0 = aus.
+    min_target_cost_ratio: float = Field(default=0.0, ge=0.0, le=20.0)
 
 
 def _parse_hhmm(value: str) -> int:
@@ -132,26 +160,70 @@ class AiConfig(BaseModel):
     max_tokens: int = Field(default=16000, ge=2000)
 
 
+def _us_session() -> "DaytradingConfig":
+    # Nach der Eroeffnungsspanne (9:30-10:00) bis kurz vor Boersenschluss, nichts ueber Nacht
+    return DaytradingConfig(enabled=True, timezone="America/New_York", entry_start="10:00", entry_end="15:45",
+                            flat_time="15:55", max_trades_per_day=6)
+
+
+class StocksConfig(BaseModel):
+    """US-Aktien im Papierhandel. Kurse von Alpaca (kostenloses Papierkonto), gehandelt wird auf einem eigenen
+    Papierkonto wie bei Krypto. Strategie und Risiko wie oben, mit den Abweichungen aus strategy/risk hier."""
+
+    enabled: bool = False
+    provider: Literal["alpaca"] = "alpaca"
+    data_feed: Literal["iex", "sip"] = "iex"  # iex: kostenlos in Echtzeit, sip: alle US-Boersen (Abo)
+    symbols: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "SPY", "QQQ"])
+    timeframe: str = "5m"
+    poll_interval_seconds: int = Field(default=15, ge=5)  # Alpaca erlaubt kostenlos 200 Anfragen pro Minute
+    starting_balance: float = Field(default=10000.0, gt=0)
+    fee_pct: float = Field(default=0.0, ge=0)  # Alpaca: keine Kommission
+    slippage_pct: float = Field(default=0.02, ge=0)
+    allow_short: bool = True
+    leverage: float = Field(default=1.0, ge=1.0, le=100.0)  # nur Papierhandel: wie bei Krypto-Futures simuliert
+    strategy: dict = Field(default_factory=lambda: {"orb_sessions": ["09:30 America/New_York"], "orb_weekdays": True})
+    risk: dict = Field(default_factory=dict)
+    protections: dict = Field(default_factory=dict)  # Abweichungen von protections oben
+    daytrading: "DaytradingConfig" = Field(default_factory=_us_session)
+
+    @field_validator("symbols")
+    @classmethod
+    def _tickers(cls, v: list[str]) -> list[str]:
+        out = []
+        for s in v:
+            t = s.strip().upper()
+            if not re.fullmatch(r"[A-Z][A-Z0-9.]{0,9}", t):
+                raise ValueError(f"'{s}' ist kein US-Tickersymbol (z. B. AAPL)")
+            if t not in out:
+                out.append(t)
+        if not out:
+            raise ValueError("mindestens eine Aktie erforderlich")
+        return out
+
+
 class FuturesConfig(BaseModel):
     """Einstellungen fuer USDT-Perpetual-Futures (noetig fuer Short-Positionen)."""
 
-    leverage: float = Field(default=1.0, ge=1.0, le=10.0)
+    leverage: float = Field(default=1.0, ge=1.0, le=100.0)
     margin_mode: Literal["isolated", "cross"] = "isolated"
 
 
 class DashboardConfig(BaseModel):
     enabled: bool = True
     port: int = Field(default=8765, ge=0, le=65535)
+    # weitere Host-Namen hinter einem Reverse-Proxy mit Passwort, z. B. 203-0-113-10.sslip.io (auch per DASHBOARD_HOSTS in .env)
+    allowed_hosts: list[str] = Field(default_factory=list)
 
 
 class BotConfig(BaseModel):
     mode: Mode = "paper"
     exchange: str = "binance"
-    market: Literal["spot", "futures"] = "spot"
+    market: Literal["spot", "futures", "stocks"] = "spot"
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     quote_currency: str = "USDT"
     timeframe: str = "1h"
     poll_interval_seconds: int = 60
+    keep_awake: bool = True  # Windows: Ruhemodus verhindern, solange der Bot laeuft
     state_dir: str = "state"
     log_dir: str = "logs"
     paper: PaperConfig = Field(default_factory=PaperConfig)
@@ -164,6 +236,7 @@ class BotConfig(BaseModel):
     ai: AiConfig = Field(default_factory=AiConfig)
     daytrading: DaytradingConfig = Field(default_factory=DaytradingConfig)
     futures: FuturesConfig = Field(default_factory=FuturesConfig)
+    stocks: StocksConfig = Field(default_factory=StocksConfig)
 
     @property
     def is_futures(self) -> bool:
@@ -177,11 +250,11 @@ class BotConfig(BaseModel):
 
     @property
     def leverage(self) -> float:
-        return self.futures.leverage if self.is_futures else 1.0
+        return self.futures.leverage if self.market in ("futures", "stocks") else 1.0
 
     @model_validator(mode="after")
     def _market_rules(self):
-        if self.strategy.allow_short and not self.is_futures:
+        if self.strategy.allow_short and self.market == "spot":
             raise ValueError("Short-Positionen (strategy.allow_short) gehen nur mit market: futures, nicht im Spot-Handel")
         if self.strategy.allow_short and self.strategy.name == "claude_advisor":
             raise ValueError("Die KI-Strategie claude_advisor kann noch keine Short-Positionen. Setze allow_short: false.")
@@ -214,6 +287,13 @@ class Secrets(BaseSettings):
     anthropic_api_key: str = ""
     telegram_bot_token: str = ""
     telegram_chat_id: str = ""
+    dashboard_hosts: str = ""  # komma-getrennt, ergaenzt dashboard.allowed_hosts
+    alpaca_api_key: str = ""  # Aktien: Schluessel eines Alpaca-Papierkontos (nur Kurse, keine Orders)
+    alpaca_api_secret: str = ""
+
+    @property
+    def dashboard_host_list(self) -> list[str]:
+        return [h.strip() for h in self.dashboard_hosts.split(",") if h.strip()]
 
 
 class Settings(BaseModel):
@@ -249,10 +329,28 @@ class Settings(BaseModel):
                 )
 
 
-def load_settings(config_path: str | Path = "config.yaml") -> Settings:
+def load_base_config(config_path: str | Path = "config.yaml") -> dict:
     path = Path(config_path)
-    data = {}
-    if path.exists():
-        with path.open("r", encoding="utf-8") as fh:
-            data = yaml.safe_load(fh) or {}
+    if not path.exists():
+        return {}
+    with path.open("r", encoding="utf-8") as fh:
+        data = yaml.safe_load(fh) or {}
+    return data if isinstance(data, dict) else {}
+
+
+def load_settings(config_path: str | Path = "config.yaml", use_override: bool = True) -> Settings:
+    """config.yaml plus die in der App gespeicherten Einstellungen (state/settings_override.yaml).
+    Passt die App-Fassung nicht mehr zu config.yaml, gilt config.yaml und es gibt eine Warnung im Log."""
+    data = load_base_config(config_path)
+    if use_override:
+        from .app_settings import load_override, merge
+
+        override = load_override(data.get("state_dir", "state"))
+        if override:
+            try:
+                return Settings(bot=BotConfig(**merge(data, override)), secrets=Secrets())
+            except ValueError as exc:
+                import logging
+
+                logging.getLogger(__name__).warning("App-Einstellungen ungueltig, es gilt config.yaml: %s", exc)
     return Settings(bot=BotConfig(**data), secrets=Secrets())

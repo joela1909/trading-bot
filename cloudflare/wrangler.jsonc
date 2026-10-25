@@ -1,0 +1,38 @@
+{
+  // Trading Bot auf Cloudflare: Worker (Passwort + Weiterleitung) vor einem Container mit dem Python-Bot.
+  // Einrichten und deployen: siehe cloudflare/README.md bzw. cloudflare/deploy.bat
+  "$schema": "node_modules/wrangler/config-schema.json",
+  "name": "trading-bot",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-10-01",
+  "workers_dev": true,
+  "observability": { "enabled": true },
+
+  "containers": [
+    {
+      "class_name": "TradingBot",
+      // dasselbe Docker-Image wie fuer einen eigenen Server, gebaut aus dem Projektordner
+      "image": "../Dockerfile",
+      "image_build_context": "..",
+      // 1/4 vCPU, 1 GiB RAM. "lite" (256 MiB) reicht fuer pandas nicht.
+      "instance_type": "basic",
+      "max_instances": 1,
+      // in der EU laufen: Binance sperrt Anfragen aus manchen Laendern, z. B. den USA
+      "constraints": { "jurisdiction": "eu" }
+    }
+  ],
+
+  "durable_objects": {
+    "bindings": [{ "name": "BOT", "class_name": "TradingBot" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TradingBot"] }],
+
+  // Zustand des Bots (Positionen, Trades, Papierkonto). Anlegen: npx wrangler r2 bucket create trading-bot-state
+  "r2_buckets": [{ "binding": "STATE", "bucket_name": "trading-bot-state" }],
+
+  // bremst fehlgeschlagene Anmeldungen: hoechstens 10 je Minute und IP
+  "ratelimits": [{ "name": "LOGIN_LIMIT", "namespace_id": "4201", "simple": { "limit": 10, "period": 60 } }],
+
+  // jede Minute: Bot wach halten bzw. nach einem Neustart durch Cloudflare wieder starten
+  "triggers": { "crons": ["* * * * *"] }
+}

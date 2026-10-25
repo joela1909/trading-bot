@@ -67,3 +67,7 @@ class Protections:
         self.peak = d.get("peak")
         self.locked_until = int(d.get("locked_until", 0))
         self.lock_reason = d.get("lock_reason", "")
+        # Sperre nach Stop-Loss-Serie abgeschaltet: eine noch laufende Sperre dieser Art sofort aufheben
+        if self.cfg.stoploss_guard_stops <= 0 and self.lock_reason == "Stop-Loss-Serie":
+            self.locked_until, self.lock_reason = 0, ""
+            self.stop_times = []

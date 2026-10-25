@@ -1,9 +1,42 @@
+# Dauerbetrieb auf einem Linux-Server: docker compose up -d --build
+# Der Bot startet nach Abstuerzen und nach einem Server-Neustart von selbst wieder.
 services:
   bot:
     build: .
     env_file: .env
+    environment:
+      TZ: Europe/Berlin
+    # Host-Netz: Das Dashboard lauscht nur auf 127.0.0.1 des Servers und ist aus dem Internet nicht erreichbar.
+    # Zugriff vom eigenen PC ueber einen SSH-Tunnel (dashboard-server.bat bzw. ./dashboard-server.sh).
+    network_mode: host
     volumes:
       - ./config.yaml:/app/config.yaml:ro
+      - ./config.bitget-ki.yaml:/app/config.bitget-ki.yaml:ro
       - ./state:/app/state
       - ./logs:/app/logs
+      - ./data:/app/data
+      - ./reports:/app/reports
     restart: unless-stopped
+    stop_grace_period: 30s
+    logging:
+      driver: json-file
+      options:
+        max-size: "10m"
+        max-file: "3"
+
+  # Optional: Dashboard vom Handy aus erreichbar, mit HTTPS und Passwort. Einrichten mit: bash deploy/public-dashboard.sh
+  # Laeuft nur, wenn in .env COMPOSE_PROFILES=public steht.
+  caddy:
+    image: caddy:2.8.4
+    profiles: ["public"]
+    network_mode: host
+    volumes:
+      - ./caddy/Caddyfile:/etc/caddy/Caddyfile:ro
+      - ./caddy/data:/data
+      - ./caddy/config:/config
+    restart: unless-stopped
+    logging:
+      driver: json-file
+      options:
+        max-size: "5m"
+        max-file: "2"

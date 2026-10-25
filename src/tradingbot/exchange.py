@@ -6,6 +6,7 @@ import time
 from pathlib import Path
 from typing import Protocol
 
+from . import remote_state
 from .data import DataFeed
 from .models import Fill, MarketLimits
 
@@ -52,13 +53,22 @@ class PaperBroker:
         self.slippage = slippage_pct / 100.0
         self.state_path = Path(state_path) if state_path else None
         self.balances: dict[str, float] = {quote_currency: float(starting_balance)}
+        if self.state_path:
+            remote_state.pull_if_missing(self.state_path)
         if self.state_path and self.state_path.exists():
             self.balances = json.loads(self.state_path.read_text(encoding="utf-8"))
+
+    def reset(self, starting_balance: float) -> None:
+        """Papierkonto auf das Startkapital zuruecksetzen."""
+        self.balances = {self.quote: float(starting_balance)}
+        self._save()
 
     def _save(self) -> None:
         if self.state_path:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps(self.balances, indent=2), encoding="utf-8")
+            text = json.dumps(self.balances, indent=2)
+            self.state_path.write_text(text, encoding="utf-8")
+            remote_state.push(self.state_path, text)
 
     def balance_quote(self) -> float:
         return float(self.balances.get(self.quote, 0.0))
@@ -149,15 +159,25 @@ class PaperFuturesBroker:
         self.cash = float(starting_balance)
         # je Paar: Menge mit Vorzeichen (+ Long, - Short), Einstiegskurs und gebundene Sicherheit
         self.positions: dict[str, dict] = {}
+        if self.state_path:
+            remote_state.pull_if_missing(self.state_path)
         if self.state_path and self.state_path.exists():
             data = json.loads(self.state_path.read_text(encoding="utf-8"))
             self.cash = float(data.get("cash", starting_balance))
             self.positions = dict(data.get("positions", {}))
 
+    def reset(self, starting_balance: float) -> None:
+        """Papierkonto auf das Startkapital zuruecksetzen (ohne offene Positionen)."""
+        self.cash = float(starting_balance)
+        self.positions = {}
+        self._save()
+
     def _save(self) -> None:
         if self.state_path:
             self.state_path.parent.mkdir(parents=True, exist_ok=True)
-            self.state_path.write_text(json.dumps({"cash": self.cash, "positions": self.positions}, indent=2), encoding="utf-8")
+            text = json.dumps({"cash": self.cash, "positions": self.positions}, indent=2)
+            self.state_path.write_text(text, encoding="utf-8")
+            remote_state.push(self.state_path, text)
 
     def balance_quote(self) -> float:
         """Freie Sicherheit, die nicht in Positionen gebunden ist."""

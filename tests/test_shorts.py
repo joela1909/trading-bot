@@ -320,3 +320,100 @@ def test_history_cache_filename_has_no_colon(tmp_path):
     load_history(Feed(), SYMBOL, "1m", "2026-01-01", "2026-01-02", tmp_path)
     names = [p.name for p in tmp_path.iterdir()]
     assert names and all(":" not in n for n in names)
+
+
+# ------------------------------------------------------------------ Marktansicht ("Was der Bot sieht")
+def test_bot_builds_market_view_with_status(small_strategy_cfg, tmp_path):
+    import json
+
+    bot, feed, _, _ = _futures_bot(small_strategy_cfg, tmp_path)
+    bot.run_once()
+    snap = bot.get_snapshot()
+    json.dumps(snap, allow_nan=False)  # gueltiges JSON fuers Dashboard, kein NaN
+    view = snap["market"][0]
+    assert view["symbol"] == SYMBOL and "candles" not in view, "Uebersicht ohne Kerzen (klein halten)"
+    chart = bot.chart(SYMBOL)
+    json.dumps(chart, allow_nan=False)
+    assert len(chart["candles"]) > 10 and chart["trades"] == []
+    assert {line["label"] for line in chart["lines"]} == {"EMA schnell", "EMA langsam"}
+    assert all(line["visible"] for line in chart["lines"])
+    assert bot.chart("XRP/USDT:USDT")["candles"] == []
+    assert view["position"]["side"] == "short" and view["position"]["opened_at"]
+    assert view["status"].startswith("Short eroeffnet")
+    assert view["explain"]
+    bot.run_once()
+    assert bot.get_snapshot()["market"][0]["status"].startswith("Short offen")
+
+
+@pytest.mark.parametrize("name", sorted(REGISTRY))
+def test_every_strategy_explains_itself(name):
+    strat = build_strategy(StrategyConfig(name=name, allow_short=True))
+    df = strat.prepare(_mixed())
+    lines = strat.explain(df)
+    assert lines and all(isinstance(x, str) and x for x in lines)
+    assert all(col in df.columns for col, _, _ in strat.chart_lines if col != "ema_trend")
+
+
+# ------------------------------------------------------------------ Kostenfilter
+def test_target_check_math():
+    risk = RiskManager(RiskConfig(min_target_cost_ratio=2.0))
+    # Kosten hin und zurueck: 2 x (0,05 + 0,05) = 0,2 %. Ziel 4 ATR bei ATR 0,05 % = 0,2 % -> unter 2 x 0,2 %
+    ok, target, cost = risk.target_check(100.0, 0.2, 0.05, 0.05)
+    assert not ok and target == pytest.approx(0.2) and cost == pytest.approx(0.2)
+    ok, target, _ = risk.target_check(100.0, 0.8, 0.05, 0.05)
+    assert ok and target == pytest.approx(0.8)
+    assert RiskManager(RiskConfig()).target_check(100.0, 0.004, 0.05, 0.05)[0], "0 = Filter aus"
+
+
+def test_backtest_skips_trades_whose_target_does_not_cover_costs():
+    cfg = StrategyConfig(name="ensemble", allow_short=True)
+    s = build_strategy(cfg)
+    df = _mixed()
+    paper = PaperConfig(fee_pct=0.5, slippage_pct=0.5)  # Kosten 2 % je Trade, Ziel muss 20 x so gross sein
+    free = Backtester(s, RiskManager(RiskConfig()), cfg, paper).run(df, SYMBOL)
+    strict = Backtester(s, RiskManager(RiskConfig(min_target_cost_ratio=20.0)), cfg, paper).run(df, SYMBOL)
+    assert free.n_trades > 0 and strict.n_trades == 0
+
+
+def test_bot_rejects_signal_when_target_too_small(small_strategy_cfg, tmp_path):
+    bot, feed, broker, _ = _futures_bot(small_strategy_cfg, tmp_path)
+    bot.cfg.risk.min_target_cost_ratio = 20.0
+    bot.cfg.paper.fee_pct = 1.0  # Kosten 2,1 % je Trade -> Ziel muesste 42 % sein
+    bot.run_once()
+    assert not bot.state.positions
+    assert "lohnt nicht" in bot.get_snapshot()["market"][0]["status"]
+    assert broker.balance_quote() == pytest.approx(1000.0)
+
+
+def test_risk_shown_includes_costs(small_strategy_cfg, tmp_path):
+    bot, feed, _, notes = _futures_bot(small_strategy_cfg, tmp_path)
+    bot.run_once()
+    pos = bot.state.positions[SYMBOL]
+    shown = bot.get_snapshot()["positions"][0]["risk_quote"]
+    bare = abs(pos.entry_price - pos.stop_loss) * pos.amount
+    assert shown > bare and shown == pytest.approx(bare + pos.entry_fee + pos.amount * pos.stop_loss * bot._exit_cost_rate())
+    feed.price = pos.stop_loss * 1.0001
+    bot.run_once()
+    assert -bot.state.trades[-1].pnl_quote <= shown * 1.05, "tatsaechlicher Verlust passt zur angezeigten Zahl"
+
+
+# ------------------------------------------------------------------ Mindestabstand des Stops
+def test_min_stop_pct_widens_stop_and_target_in_ratio():
+    s = build_strategy(StrategyConfig(name="ema_cross", stop_atr_mult=2.0, take_profit_atr_mult=4.0, min_stop_pct=0.5))
+    assert s.stop_distance(100.0, 0.05) == pytest.approx(0.5), "2 x 0,05 = 0,1 < 0,5 % -> Mindestabstand"
+    assert s.target_distance(100.0, 0.05) == pytest.approx(1.0), "Ziel bleibt doppelt so weit wie der Stop"
+    assert s.stop_distance(100.0, 1.0) == pytest.approx(2.0), "groesser als der Mindestabstand -> ATR zaehlt"
+    assert s.trailing_stop(100.0, 0.05) == pytest.approx(99.5)
+    assert s.trailing_stop_short(100.0, 0.05) == pytest.approx(100.5)
+    plain = build_strategy(StrategyConfig(name="ema_cross", stop_atr_mult=2.0, take_profit_atr_mult=4.0))
+    assert plain.stop_distance(100.0, 0.05) == pytest.approx(0.1) and plain.target_distance(100.0, 0.05) == pytest.approx(0.2)
+    assert build_strategy(StrategyConfig(name="ema_cross", take_profit_atr_mult=0.0)).target_distance(100.0, 1.0) is None
+
+
+def test_bot_uses_min_stop(small_strategy_cfg, tmp_path):
+    cfg = small_strategy_cfg.model_copy(update={"min_stop_pct": 15.0, "stop_atr_mult": 0.5, "take_profit_atr_mult": 1.0})
+    bot, feed, _, _ = _futures_bot(cfg, tmp_path)
+    bot.run_once()
+    pos = bot.state.positions[SYMBOL]
+    assert pos.stop_loss / pos.entry_price - 1 == pytest.approx(0.15, rel=1e-6), "Short-Stop 15 % ueber dem Einstieg"
+    assert 1 - pos.take_profit / pos.entry_price == pytest.approx(0.30, rel=1e-6), "Ziel doppelt so weit"

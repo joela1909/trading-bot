@@ -13,7 +13,7 @@ from .exchange import Broker
 from .models import Fill, Position, Signal, Trade, side_sign, utcnow_iso
 from .notify import Notifier
 from .protections import Protections
-from .risk import RiskManager
+from .risk import RiskManager, cap_stop
 from .session import Session, parse_iso
 from .snapshot import make_snapshot
 from .state import BotState
@@ -54,6 +54,21 @@ class TradingBot:
         self.last_cycle: str | None = None
         self.running = False
         self._snapshot: dict | None = None
+        # je Paar: abgeschlossene Kerzen und das fertig gerechnete Ergebnis der Strategie fuer die letzte Kerze
+        self._candles: dict = {}
+        self._prepared: dict = {}
+        # Chart in anderen Zeitrahmen: eigener Datenzugang (wird in build_bot gesetzt) und kurzer Zwischenspeicher
+        self.chart_feed = None
+        self.signal_feed = None  # eigener Datenzugang fuer Signal-Kerzen (z. B. Spot), sonst der Handels-Feed
+        self._chart_cache: dict = {}
+        self._reset_request: bool | None = None
+        self._fee_request = False
+        # Echtzeit: (Kerze, Richtung) des letzten Ausstiegs je Paar, "any" nach einem Einstieg
+        self._acted_candle: dict[str, tuple[int, str]] = {}
+        # Marktansicht fuers Dashboard: was der Bot je Paar zuletzt gesehen und entschieden hat
+        self.views: dict[str, dict] = {}
+        self._status: dict[str, str] = {}
+        self.exit_code = 0  # 3 = Neustart gewuenscht (neue Einstellungen aus der App)
         self.session: Session | None = Session(self.cfg.daytrading) if self.cfg.daytrading.enabled else None
 
     # ----------------------------------------------------------------- helpers
@@ -134,8 +149,136 @@ class TradingBot:
             running=self.running,
             controls=True,
             ai_meta=self._ai_meta(),
+            market=[self._view_summary(self.views[s]) for s in self.cfg.symbols if s in self.views],
+            exit_cost_rate=self._exit_cost_rate(),
+            tz=self.cfg.daytrading.timezone,
         )
         return self._snapshot
+
+    @staticmethod
+    def _view_summary(view: dict) -> dict:
+        """Marktansicht ohne Kerzen: fuer die Uebersicht, die alle paar Sekunden neu laedt."""
+        return {k: v for k, v in view.items() if k not in ("candles", "lines")}
+
+    CHART_TIMEFRAMES = ("1m", "5m", "15m", "1h", "4h", "1d")
+    CHART_CANDLES = 500
+
+    def chart(self, symbol: str, timeframe: str | None = None, since: int | None = None) -> dict:
+        out = self._chart_full(symbol, timeframe)
+        return self._chart_tail(out, since) if since else out
+
+    def _chart_full(self, symbol: str, timeframe: str | None = None) -> dict:
+        """Kerzen, Linien und Trades eines Paars fuer den interaktiven Chart.
+
+        Mit `since` (ms) nur die Kerzen ab diesem Zeitpunkt samt Linien, ohne Trades und Signal-Marken
+        ("delta": true). Liegt `since` vor der ersten Kerze, kommt alles.
+
+        Im Zeitrahmen des Bots kommt alles, was er sieht (mit den Linien der Strategie). In anderen Zeitrahmen
+        (bis 1 Tag) laedt der Chart die Kerzen eigens, die Linien der Strategie gibt es dort nicht."""
+        view = self.views.get(symbol)
+        trades = [t.to_dict() for t in self.state.trades if t.symbol == symbol][-200:]
+        tf = timeframe or self.cfg.timeframe
+        if tf == self.cfg.timeframe:
+            if view is None:
+                return {"symbol": symbol, "timeframe": tf, "candles": [], "lines": [], "trades": trades, "position": None}
+            out = {**view, "trades": trades}
+            # Der Bot rechnet nur mit abgeschlossenen Kerzen. Fuer den Chart die laufende Kerze live anhaengen,
+            # die Linien bekommen dort Luecken (die Strategie kennt die Kerze ja noch nicht).
+            extra = self._live_candles(symbol, tf, view["candles"][-1][0] if view["candles"] else None)
+            if extra:
+                out["candles"] = view["candles"] + extra
+                lines = []
+                for line in view["lines"]:
+                    line = {**line, "values": line["values"] + [None] * len(extra)}
+                    if "directions" in line:
+                        line["directions"] = line["directions"] + [None] * len(extra)
+                    lines.append(line)
+                out["lines"] = lines
+            return out
+        if tf not in self.CHART_TIMEFRAMES:
+            raise ValueError(f"Zeitrahmen {tf} gibt es nicht")
+        candles = list(self._chart_candles(symbol, tf))
+        extra = self._live_candles(symbol, tf, candles[-1][0] if candles else None, inclusive=True)
+        if extra:
+            candles = [k for k in candles if k[0] < extra[0][0]] + extra
+        base = view or {"symbol": symbol, "position": None, "explain": [], "status": ""}
+        return {
+            **base, "timeframe": tf, "candles": candles, "lines": [], "trades": trades,
+            "lines_note": f"Linien der Strategie nur im Zeitrahmen des Bots ({self.cfg.timeframe})",
+        }
+
+    LIVE_TTL = 1.5  # Sekunden: so oft holt der Chart hoechstens die juengsten Kerzen neu
+
+    @staticmethod
+    def _chart_tail(out: dict, since: int) -> dict:
+        candles = out.get("candles") or []
+        k = next((i for i, c in enumerate(candles) if c[0] >= since), len(candles))
+        if k == 0:
+            return out
+        lines = []
+        for line in out.get("lines") or []:
+            line = {**line, "values": line["values"][k:]}
+            if "directions" in line:
+                line["directions"] = line["directions"][k:]
+            lines.append(line)
+        tail = {key: v for key, v in out.items() if key not in ("trades", "markers")}
+        return {**tail, "candles": candles[k:], "lines": lines, "delta": True}
+
+    def _chart_symbol(self, symbol: str) -> str:
+        # Chart zeigt dieselben Kerzen wie die Signale (bei Spot-Signalen das Spot-Paar)
+        return symbol.split(":")[0] if self.signal_feed is not None else symbol
+
+    def _live_candles(self, symbol: str, tf: str, last_ts: int | None, inclusive: bool = False) -> list:
+        """Die juengsten Kerzen inklusive der laufenden, nur die nach `last_ts` (bzw. ab `last_ts`)."""
+        now = time.time()
+        key = ("live", symbol, tf)
+        hit = self._chart_cache.get(key)
+        if hit is None or now - hit[0] >= self.LIVE_TTL:
+            feed = self.chart_feed or self.feed
+            fetch = getattr(feed, "fetch_chart", None)
+            if fetch is None:
+                return []
+            try:
+                df = fetch(self._chart_symbol(symbol), tf, limit=3)
+            except Exception as exc:  # noqa: BLE001 - der Chart darf nie den Bot stoeren
+                log.debug("%s: laufende Kerze nicht abrufbar (%s)", symbol, exc)
+                return []
+            rows = [[int(t), float(o), float(h), float(lo), float(c)] for t, o, h, lo, c in df[["timestamp", "open", "high", "low", "close"]].itertuples(index=False)]
+            self._chart_cache[key] = (now, rows)
+        else:
+            rows = hit[1]
+        if last_ts is None:
+            return rows
+        return [r for r in rows if (r[0] >= last_ts if inclusive else r[0] > last_ts)]
+
+    def _chart_candles(self, symbol: str, tf: str) -> list:
+        """Kerzen fuer den Chart, kurz zwischengespeichert. Eigener Datenzugang, damit der Chart den Handel nie bremst."""
+        tf_s = timeframe_seconds(tf)
+        ttl = 15 if tf_s <= 900 else 60
+        now = time.time()
+        hit = self._chart_cache.get((symbol, tf))
+        if hit is not None and now - hit[0] < ttl:
+            return hit[1]
+        feed = self.chart_feed or self.feed
+        # mit der laufenden Kerze, falls der Datenzugang das kann (bei 1 Tag sonst nur bis gestern)
+        fetch = getattr(feed, "fetch_chart", None) or feed.fetch_ohlcv
+        df = fetch(self._chart_symbol(symbol), tf, limit=self.CHART_CANDLES)
+        candles = [[int(t), float(o), float(h), float(lo), float(c)] for t, o, h, lo, c in df[["timestamp", "open", "high", "low", "close"]].itertuples(index=False)]
+        self._chart_cache[(symbol, tf)] = (now, candles)
+        return candles
+
+    def _exit_cost_rate(self) -> float:
+        return (self.cfg.paper.fee_pct + self.cfg.paper.slippage_pct) / 100.0
+
+    def _risk_with_costs(self, entry: float, stop: float, amount: float, entry_fee: float) -> float:
+        """Was ein Stop-Loss wirklich kostet: Kursabstand plus Einstiegsgebuehr plus Gebuehr und Abweichung beim Ausstieg."""
+        return abs(entry - stop) * amount + entry_fee + amount * stop * self._exit_cost_rate()
+
+    def request_restart(self) -> None:
+        """Beendet den Bot mit Code 3. start-24-7.bat, Docker und Cloudflare starten ihn dann neu."""
+        log.warning("Neustart angefordert (neue Einstellungen)")
+        self.exit_code = 3
+        self.stop()
 
     def get_snapshot(self) -> dict:
         return self._snapshot or self.build_snapshot()
@@ -151,6 +294,104 @@ class TradingBot:
         self._save()
         log.warning("Neue Einstiege wieder aktiv (Dashboard)")
         return self.build_snapshot()
+
+    def request_account_reset(self, clear_trades: bool) -> dict:
+        """Konto-Reset anfordern. Er laeuft zu Beginn der naechsten Runde im Bot-Thread, damit er sich nicht mit
+        einer laufenden Runde ueberschneidet."""
+        if self.broker.name != "paper" or not hasattr(self.broker, "reset"):
+            raise ValueError("Zuruecksetzen geht nur im Papierhandel")
+        self._reset_request = bool(clear_trades)
+        log.warning("Konto-Reset angefordert (Trades loeschen: %s)", clear_trades)
+        return {"ok": True, "pending": True, "positions": len(self.state.positions)}
+
+    def request_fee_reprice(self) -> dict:
+        """Neuberechnung der Gebuehren anfordern; laeuft zu Beginn der naechsten Runde im Bot-Thread."""
+        if self.broker.name != "paper":
+            raise ValueError("Gebuehren nachrechnen geht nur im Papierhandel")
+        self._fee_request = True
+        log.warning("Gebuehren-Neuberechnung angefordert (%.3f %% je Order)", self.cfg.paper.fee_pct)
+        return {"ok": True, "pending": True, "fee_pct": self.cfg.paper.fee_pct, "trades": len(self.state.trades)}
+
+    def reprice_fees(self) -> dict:
+        """Rechnet die Gebuehren aller gespeicherten Trades und offenen Positionen mit dem aktuellen Satz
+        (paper.fee_pct) neu, als waeren sie schon damit gehandelt worden. Gewinn, Kapital, Tagesstart und
+        Kapitalverlauf ziehen um den Unterschied nach; Kurse und Mengen bleiben."""
+        rate = self.cfg.paper.fee_pct / 100.0
+        changes: list[tuple[datetime, float]] = []
+        for t in self.state.trades:
+            new = (t.entry_price + t.exit_price) * t.amount * rate
+            delta = t.fees - new
+            if abs(delta) < 1e-12:
+                continue
+            t.fees = new
+            t.pnl_quote += delta
+            t.pnl_pct = t.pnl_quote / (t.entry_price * t.amount) * 100.0 if t.entry_price * t.amount else 0.0
+            changes.append((parse_iso(t.closed_at), delta))
+        for pos in self.state.positions.values():
+            new = pos.entry_price * pos.amount * rate
+            delta = pos.entry_fee - new
+            if abs(delta) >= 1e-12:
+                pos.entry_fee = new
+                changes.append((parse_iso(pos.opened_at), delta))
+        total = sum(d for _, d in changes)
+        if hasattr(self.broker, "cash"):
+            self.broker.cash += total
+        else:
+            self.broker.balances[self.broker.quote] = self.broker.balance_quote() + total
+        self.broker._save()
+        # Tagesstart: nur um Trades vor dem heutigen Tagesbeginn verschieben
+        from zoneinfo import ZoneInfo
+
+        tz = ZoneInfo(self.cfg.daytrading.timezone) if self.session is not None else timezone.utc
+        day_start = self._now().astimezone(tz).replace(hour=0, minute=0, second=0, microsecond=0)
+        if self.state.day_start_equity:
+            self.state.day_start_equity += sum(d for ts, d in changes if ts < day_start)
+        for point in self.state.equity_history:
+            try:
+                at = datetime.fromisoformat(point[0])
+            except ValueError:
+                continue
+            point[1] = round(point[1] + sum(d for ts, d in changes if ts <= at), 4)
+        self._save()
+        self.build_snapshot()
+        log.warning("Gebuehren neu berechnet (%.3f %%): %d Trades/Positionen, Kapital %+.2f %s",
+                    self.cfg.paper.fee_pct, len(changes), total, self.cfg.quote_currency)
+        return {"changed": len(changes), "delta": total}
+
+    def _do_account_reset(self, clear_trades: bool) -> None:
+        for symbol, pos in list(self.state.positions.items()):
+            try:
+                self._close_position(symbol, pos, "reset")
+            except Exception:  # noqa: BLE001
+                log.exception("%s: Position liess sich beim Reset nicht schliessen", symbol)
+                self.state.positions.pop(symbol, None)
+        self.broker.reset(self.cfg.paper.starting_balance)
+        if clear_trades:
+            self.state.trades = []
+        self.state.equity_history = []
+        self.state.day_start_equity = None
+        self.state.day = None
+        self.state.entries_halted_for_day = False
+        self.state.entries_today = 0
+        self.protections = Protections(self.cfg.protections, timeframe_seconds(self.cfg.timeframe) * 1000)
+        self.last_equity = None
+        self._save()
+        log.warning("Konto auf %.2f %s zurueckgesetzt", self.cfg.paper.starting_balance, self.cfg.quote_currency)
+
+    def delete_oldest_trades(self, count: int) -> dict:
+        """Entfernt die aeltesten abgeschlossenen Trades aus dem Verlauf. Kapital und offene Positionen bleiben."""
+        count = max(0, min(int(count), len(self.state.trades)))
+        removed = self.state.trades[:count]
+        del self.state.trades[:count]
+        self._save()
+        self.build_snapshot()
+        log.warning("%d Trades aus dem Verlauf geloescht (Dashboard)", count)
+        return {
+            "deleted": count,
+            "remaining": len(self.state.trades),
+            "from": removed[0].closed_at if removed else None,
+            "to": removed[-1].closed_at if removed else None,
+        }
 
     @staticmethod
     def _now() -> datetime:
@@ -185,6 +426,12 @@ class TradingBot:
 
     # ------------------------------------------------------------------ cycle
     def run_once(self) -> float:
+        if self._reset_request is not None:
+            clear, self._reset_request = self._reset_request, None
+            self._do_account_reset(clear)
+        if self._fee_request:
+            self._fee_request = False
+            self.reprice_fees()
         prices: dict[str, float] = {}
         for symbol in self.cfg.symbols:
             try:
@@ -219,22 +466,165 @@ class TradingBot:
         self.build_snapshot()
         return final_equity
 
+    CANDLE_TOPUP = 5  # so viele Kerzen holt ein Abruf, wenn der Rest schon im Speicher liegt
+
+    def _fetch_candles(self, symbol: str):
+        """Abgeschlossene Kerzen fuer die Strategie. Beim ersten Mal alle, danach nur die neuesten (spart Abrufe:
+        bei 1m und drei Tagen Vorlauf sonst 5 Anfragen je Paar und Runde)."""
+        import pandas as pd
+
+        need = self.strategy.warmup_bars + 10
+        tf = self.cfg.timeframe
+        cached = self._candles.get(symbol)
+        if cached is not None and len(cached) >= need:
+            feed, sym = self._signal_src(symbol)
+            new = feed.fetch_ohlcv(sym, tf, limit=self.CANDLE_TOPUP)
+            tf_ms = timeframe_seconds(tf) * 1000
+            if new.empty or int(new["timestamp"].iloc[0]) <= int(cached["timestamp"].iloc[-1]) + tf_ms:
+                df = pd.concat([cached, new], ignore_index=True).drop_duplicates("timestamp", keep="last")
+                df = df.sort_values("timestamp").tail(need).reset_index(drop=True)
+                self._candles[symbol] = df
+                return df
+            log.info("%s: Luecke in den Kerzen, lade alle neu", symbol)
+        feed, sym = self._signal_src(symbol)
+        df = feed.fetch_ohlcv(sym, tf, limit=need)
+        self._candles[symbol] = df
+        return df
+
+    def _signal_src(self, symbol: str):
+        """(Datenzugang, Symbol) fuer die Kerzen der Strategie. Bei Spot-Signalen: BTC/USDT:USDT -> BTC/USDT."""
+        if self.signal_feed is not None:
+            return self.signal_feed, symbol.split(":")[0]
+        return self.feed, symbol
+
+    def _forming_candle(self, symbol: str, after_ts: int):
+        """Die noch laufende Kerze (Eroeffnung, Hoch, Tief, aktueller Kurs) nach `after_ts`, sonst None."""
+        feed, sym = self._signal_src(symbol)
+        fetch = getattr(feed, "fetch_chart", None)
+        if fetch is None:
+            return None
+        try:
+            live = fetch(sym, self.cfg.timeframe, limit=2)
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: laufende Kerze nicht abrufbar (%s)", symbol, exc)
+            return None
+        live = live[live["timestamp"] > after_ts]
+        return live if not live.empty else None
+
     def process_symbol(self, symbol: str, price: float) -> None:
-        df = self.feed.fetch_ohlcv(symbol, self.cfg.timeframe, limit=self.strategy.warmup_bars + 10)
-        if df.empty:
+        raw = self._fetch_candles(symbol)
+        if raw.empty:
             log.warning("%s: keine Kerzen erhalten", symbol)
             return
-        df = self.strategy.prepare(df)
-        last_ts = int(df["timestamp"].iloc[-1])
+        realtime = self.cfg.strategy.realtime_signals
+        if realtime:
+            # Echtzeit: die laufende Kerze rechnet mit, bei jeder Runde neu
+            import pandas as pd
+
+            live = self._forming_candle(symbol, int(raw["timestamp"].iloc[-1]))
+            if live is not None:
+                raw = pd.concat([raw, live], ignore_index=True)
+            df = self.strategy.prepare(raw)
+            last_ts = int(raw["timestamp"].iloc[-1])
+        else:
+            last_ts = int(raw["timestamp"].iloc[-1])
+            # Signale haengen nur an abgeschlossenen Kerzen: innerhalb einer Kerze nicht neu rechnen
+            hit = self._prepared.get(symbol)
+            if hit is not None and hit[0] == last_ts:
+                df = hit[1]
+            else:
+                df = self.strategy.prepare(raw)
+                self._prepared[symbol] = (last_ts, df)
         is_new_candle = self.state.last_candle_ts.get(symbol) != last_ts
 
         pos = self.state.positions.get(symbol)
         if pos is not None:
-            self._manage_position(symbol, pos, price, df, is_new_candle)
-        elif is_new_candle:
-            self._maybe_enter(symbol, price, df)
+            # Echtzeit: Ausstiegssignale bei jeder Runde pruefen, nicht nur bei neuer Kerze
+            self._manage_position(symbol, pos, price, df, is_new_candle or realtime)
+            if realtime and symbol not in self.state.positions:
+                # Ausstieg: in derselben Kerze nur noch in die Gegenrichtung (Umkehr), sofort in dieser Runde
+                self._acted_candle[symbol] = (last_ts, pos.side)
+                self._maybe_enter(symbol, price, df, block_side=pos.side)
+                if symbol in self.state.positions:
+                    self._acted_candle[symbol] = (last_ts, "any")
+        else:
+            acted = self._acted_candle.get(symbol)
+            same = realtime and acted is not None and acted[0] == last_ts
+            if is_new_candle or (realtime and not same) or (same and acted[1] != "any"):
+                # Echtzeit: hoechstens ein Einstieg je Paar und Kerze; nach einem Ausstieg nur die Gegenrichtung
+                self._maybe_enter(symbol, price, df, block_side=acted[1] if same and not is_new_candle else None)
+                if realtime and symbol in self.state.positions:
+                    self._acted_candle[symbol] = (last_ts, "any")
 
         self.state.last_candle_ts[symbol] = last_ts
+        self._build_view(symbol, price, df)
+
+    VIEW_CANDLES = 600  # bei 1m-Kerzen 10 Stunden, das Dashboard zeigt davon 1, 3 oder 10 Stunden
+
+    def _build_view(self, symbol: str, price: float, df) -> None:
+        """Haelt fest, was der Bot sieht. Fehler hier duerfen den Handel nie stoeren."""
+        try:
+            tail = df.tail(self.VIEW_CANDLES)
+
+            def clean(values) -> list:
+                return [None if v is None or v != v else round(float(v), 8) for v in values]
+
+            candles = [[int(t), *clean(row)] for t, row in zip(tail["timestamp"], tail[["open", "high", "low", "close"]].to_numpy())]
+            # Beim Ensemble sind anfangs nur Tages-VWAP und Trend-EMA sichtbar, der Rest laesst sich einblenden
+            many = len(self.strategy.chart_lines) > 4
+            shown = self.strategy.chart_visible
+            lines = []
+            for col, label, style in self.strategy.chart_lines:
+                if col not in tail.columns:
+                    continue
+                visible = col in shown if shown is not None else (not many) or col in ("vwap", "ema_trend")
+                line = {"key": col, "label": label, "style": style, "visible": visible, "values": clean(tail[col].tolist())}
+                dcol = self.strategy.line_direction.get(col)
+                if dcol and dcol in tail.columns:
+                    line["directions"] = [None if v != v else ("long" if v >= 0.5 else "short") for v in tail[dcol].tolist()]
+                lines.append(line)
+            markers = []
+            for col, side, text_col in self.strategy.chart_markers:
+                if col not in tail.columns:
+                    continue
+                for t, flag, txt in zip(tail["timestamp"], tail[col], tail[text_col] if text_col else [None] * len(tail)):
+                    if bool(flag):
+                        markers.append({"time": int(t), "side": side, "text": "" if txt is None else str(int(txt))})
+            votes = self.strategy.member_votes(df) if hasattr(self.strategy, "member_votes") else None
+            pos = self.state.positions.get(symbol)
+            session = None
+            if self.session is not None:
+                dt = self.cfg.daytrading
+                session = {
+                    "window": f"{dt.entry_start}-{dt.entry_end}",
+                    "flat": dt.flat_time,
+                    "entry_open": self.session.entry_allowed(self._now()),
+                    "entries_today": self.state.entries_today,
+                    "max_entries": dt.max_trades_per_day,
+                }
+            self.views[symbol] = {
+                "symbol": symbol,
+                "price": price,
+                "timeframe": self.cfg.timeframe,
+                "strategy": self.strategy.name,
+                "candles": candles,
+                "lines": lines,
+                "explain": self.strategy.explain(df),
+                "status": self._status.get(symbol, "Wartet auf die naechste abgeschlossene Kerze"),
+                "position": (
+                    {"side": pos.side, "entry": pos.entry_price, "stop": pos.stop_loss, "take_profit": pos.take_profit, "opened_at": pos.opened_at,
+                     "strategy": pos.strategy}
+                    if pos is not None
+                    else None
+                ),
+                "session": session,
+                "votes": votes,
+                "markers": markers,
+                "min_votes": getattr(self.strategy, "min_votes", None) if votes is not None else None,
+                "updated": utcnow_iso(),
+            }
+        except Exception:  # noqa: BLE001
+            log.exception("Marktansicht fuer %s fehlgeschlagen", symbol)
 
     # --------------------------------------------------- Stop-Loss bei der Boerse
     def _exchange_stops_enabled(self) -> bool:
@@ -292,14 +682,31 @@ class TradingBot:
     def _manage_position(self, symbol: str, pos: Position, price: float, df, is_new_candle: bool) -> None:
         if self._sync_exchange_stop(symbol, pos):
             return
+        self._status[symbol] = (
+            f"{'Short' if pos.is_short else 'Long'} offen: Einstieg {pos.entry_price:.4f}, Stop {pos.stop_loss:.4f}"
+            + (f", Take-Profit {pos.take_profit:.4f}" if pos.take_profit is not None else "")
+        )
         if self.session is not None:
             reason = self.session.must_close(self._now(), parse_iso(pos.opened_at))
             if reason:
                 log.info("%s: Tageshandel, Position wird geschlossen (%s)", symbol, reason)
                 self._close_position(symbol, pos, reason)
                 return
+        # Strategie mit eigener Trailing-Linie (z. B. SuperTrend): Stop an der Linie der letzten Kerze nachziehen
+        line_col = self.strategy.trail_line_for(pos.strategy)
+        if line_col and self.cfg.strategy.trailing_stop and line_col in df.columns:
+            v = float(df[line_col].iloc[-1])
+            if v == v:
+                if pos.is_short and v > price and v < pos.stop_loss:
+                    log.info("%s: Stop an der Linie (Short) %.4f -> %.4f", symbol, pos.stop_loss, v)
+                    pos.set_stop(v, "line")
+                elif not pos.is_short and v < price and v > pos.stop_loss:
+                    log.info("%s: Stop an der Linie %.4f -> %.4f", symbol, pos.stop_loss, v)
+                    pos.set_stop(v, "line")
+                    if self._raise_exchange_stop(symbol, pos):
+                        return
         # bester Kurs seit Einstieg: bei Long das Hoch, bei Short das Tief
-        if (price < pos.highest_price) if pos.is_short else (price > pos.highest_price):
+        elif (price < pos.highest_price) if pos.is_short else (price > pos.highest_price):
             pos.highest_price = price
             if self.cfg.strategy.trailing_stop:
                 atr_now = float(df["atr"].iloc[-1])
@@ -308,12 +715,12 @@ class TradingBot:
                         new_stop = self.strategy.trailing_stop_short(pos.highest_price, atr_now)
                         if new_stop < pos.stop_loss:
                             log.info("%s: Trailing-Stop (Short) %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
-                            pos.stop_loss = new_stop
+                            pos.set_stop(new_stop, "trailing")
                     else:
                         new_stop = self.strategy.trailing_stop(pos.highest_price, atr_now)
                         if new_stop > pos.stop_loss:
                             log.info("%s: Trailing-Stop %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
-                            pos.stop_loss = new_stop
+                            pos.set_stop(new_stop, "trailing")
                             if self._raise_exchange_stop(symbol, pos):
                                 return
 
@@ -329,52 +736,79 @@ class TradingBot:
             if decision.signal == exit_signal:
                 self._close_position(symbol, pos, f"signal: {decision.reason}")
 
-    def _maybe_enter(self, symbol: str, price: float, df) -> None:
+    def _maybe_enter(self, symbol: str, price: float, df, block_side: str | None = None) -> None:
         if self.state.entries_paused:
             log.info("%s: Einstiege pausiert", symbol)
+            self._status[symbol] = "Kein Einstieg: Einstiege sind pausiert"
             return
         if self.state.entries_halted_for_day:
             log.info("%s: Tagesverlustlimit erreicht, kein Einstieg", symbol)
+            self._status[symbol] = "Kein Einstieg: Tagesverlustlimit erreicht"
             return
         if self.session is not None:
             dt = self.cfg.daytrading
             if not self.session.entry_allowed(self._now()):
                 log.info("%s: kein Einstieg, ausserhalb der Einstiegszeit %s-%s", symbol, dt.entry_start, dt.entry_end)
+                self._status[symbol] = f"Kein Einstieg: ausserhalb der Einstiegszeit {dt.entry_start}-{dt.entry_end}"
                 return
             if dt.max_trades_per_day and self.state.entries_today >= dt.max_trades_per_day:
                 log.info("%s: kein Einstieg, max. %d Einstiege pro Tag erreicht", symbol, dt.max_trades_per_day)
+                self._status[symbol] = f"Kein Einstieg: {dt.max_trades_per_day} Einstiege heute erreicht"
                 return
         allowed, why = self.protections.entry_allowed(symbol, int(time.time() * 1000))
         if not allowed:
             log.info("%s: kein Einstieg, %s", symbol, why)
+            self._status[symbol] = f"Kein Einstieg: {why}"
             return
         if not self.risk.can_open_new(len(self.state.positions)):
             log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
+            self._status[symbol] = "Kein Einstieg: maximale Zahl offener Positionen erreicht"
             return
         decision = self.strategy.decide(df, context=self._context(symbol, price, None))
         is_short = decision.signal == Signal.SHORT
         if decision.signal != Signal.BUY and not (is_short and self.cfg.strategy.allow_short):
             log.debug("%s: %s (%s)", symbol, decision.signal.value, decision.reason)
+            self._status[symbol] = "Wartet: keine Einstiegsbedingung erfuellt" if decision.reason == "kein Signal" else f"Wartet: {decision.reason}"
             return
         if decision.atr is None or decision.atr <= 0:
             return
         side = "short" if is_short else "long"
+        if block_side in (side, "any"):
+            self._status[symbol] = f"Wartet: in dieser Kerze schon {'Short' if side == 'short' else 'Long'} gehandelt"
+            return
         sign = side_sign(side)
+        paper = self.cfg.paper
+        idx = len(df) - 1
+        trigger = self.strategy.trigger_at(df, idx, side)
+        plan_stop, plan_tp = self.strategy.entry_plan(df, idx, side, price, decision.atr)
+        worth_it, target_pct, cost_pct = self.risk.target_check(
+            price, abs(plan_tp - price) if plan_tp is not None else abs(price - plan_stop), paper.fee_pct, paper.slippage_pct
+        )
+        if not worth_it and self.strategy.cost_check(trigger):
+            ratio = self.cfg.risk.min_target_cost_ratio
+            log.info("%s: %s-Signal verworfen, Ziel %.3f %% unter %.1f x Kosten (%.3f %%)", symbol, side, target_pct, ratio, cost_pct)
+            self._status[symbol] = (
+                f"{side.capitalize()}-Signal verworfen: Ziel {target_pct:.2f} % lohnt nicht, "
+                f"noetig sind {ratio:g} x Kosten = {ratio * cost_pct:.2f} %"
+            )
+            return
 
         equity = self.equity()
         free_quote = self.broker.balance_quote()
-        stop = price - sign * self.cfg.strategy.stop_atr_mult * decision.atr
+        stop, _ = cap_stop(price, plan_stop, side, self.cfg.leverage)
         amount = self.risk.position_size(
             equity, free_quote, price, stop, self.broker.limits(symbol), side=side, leverage=self.cfg.leverage
         )
         if amount <= 0:
             log.info("%s: %s-Signal, aber Positionsgroesse unter Mindestorder (Kapital %.2f)", symbol, side, equity)
+            self._status[symbol] = f"{side.capitalize()}-Signal, aber die Positionsgroesse liegt unter der Mindestorder"
             return
 
         fill = self.broker.open_position(symbol, side, amount)
-        entry_stop = fill.price - sign * self.cfg.strategy.stop_atr_mult * decision.atr
-        tp_mult = self.cfg.strategy.take_profit_atr_mult
-        take_profit = fill.price + sign * tp_mult * decision.atr if tp_mult > 0 else None
+        fill_stop, take_profit = self.strategy.entry_plan(df, idx, side, fill.price, decision.atr)
+        entry_stop, moved = cap_stop(fill.price, fill_stop, side, self.cfg.leverage)
+        if moved:
+            log.info("%s: Stop vor die Liquidation gelegt (Hebel %gx): %.4f", symbol, self.cfg.leverage, entry_stop)
         pos = Position(
             symbol=symbol,
             amount=fill.amount,
@@ -387,6 +821,8 @@ class TradingBot:
             atr_at_entry=decision.atr,
             side=side,
             leverage=self.cfg.leverage,
+            strategy=trigger,
+            initial_stop=entry_stop,
         )
         self.state.positions[symbol] = pos
         self.state.entries_today += 1
@@ -396,10 +832,11 @@ class TradingBot:
         msg = (
             f"{'SHORT' if is_short else 'KAUF'} {symbol}: {fill.amount:.6f} @ {fill.price:.4f} "
             f"(Groesse {fill.amount * fill.price:.2f} {self.cfg.quote_currency}, "
-            f"Risiko bis Stop {abs(fill.price - entry_stop) * fill.amount:.2f} {self.cfg.quote_currency}) "
+            f"Risiko bis Stop inkl. Kosten {self._risk_with_costs(fill.price, entry_stop, fill.amount, fill.fee):.2f} {self.cfg.quote_currency}) "
             f"(Stop {entry_stop:.4f}, TP {tp_text}, {decision.reason})"
         )
         self.notifier.send(msg)
+        self._status[symbol] = f"{'Short' if is_short else 'Long'} eroeffnet: {decision.reason}"
 
     def _close_position(self, symbol: str, pos: Position, reason: str, fill: Fill | None = None) -> None:
         if fill is None and pos.stop_order_id:
@@ -430,10 +867,15 @@ class TradingBot:
             closed_at=fill.timestamp,
             reason=reason,
             side=pos.side,
+            strategy=pos.strategy,
+            leverage=pos.leverage,
+            initial_stop=pos.initial_stop,
+            stop_kind=pos.stop_kind if reason.startswith("stop_loss") else "",
         )
         self.state.trades.append(trade)
         self.protections.on_exit(symbol, reason, int(time.time() * 1000))
         del self.state.positions[symbol]
+        self._status[symbol] = f"{'Short' if pos.is_short else 'Long'} geschlossen: {reason}"
         self._save()
         self.notifier.send(
             f"{'SHORT ZU' if pos.is_short else 'VERKAUF'} {symbol}: {pos.amount:.6f} @ {fill.price:.4f} "

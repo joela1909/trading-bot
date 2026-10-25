@@ -29,6 +29,10 @@ tradingbot = "tradingbot.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+# Dateien der App (Dashboard) mit ausliefern
+[tool.setuptools.package-data]
+tradingbot = ["web/*", "web/fonts/*", "web/vendor/*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 pythonpath = ["src"]

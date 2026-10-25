@@ -3,9 +3,10 @@ from __future__ import annotations
 from datetime import datetime, timezone
 
 from .state import BotState
+from .stats import analyze
 
 MAX_CHART_POINTS = 500
-MAX_TRADES = 100
+MAX_TRADES = 300
 
 
 def compute_stats(trades: list) -> dict:
@@ -49,6 +50,9 @@ def make_snapshot(
     running: bool,
     controls: bool,
     ai_meta: dict | None = None,
+    market: list[dict] | None = None,
+    exit_cost_rate: float = 0.0,
+    tz: str = "Europe/Berlin",
 ) -> dict:
     history = list(state.equity_history)
     if equity is None and history:
@@ -71,7 +75,8 @@ def make_snapshot(
             pnl_pct = pnl / invested * 100.0 if invested else None
         # Groesse: Nennwert zum aktuellen Kurs, gebundene Sicherheit und Verlust bis zum Stop
         notional = p.amount * (price if price is not None else p.entry_price)
-        risk_quote = abs(p.entry_price - p.stop_loss) * p.amount
+        # Verlust beim Stop inklusive Einstiegsgebuehr und Kosten des Ausstiegs
+        risk_quote = abs(p.entry_price - p.stop_loss) * p.amount + p.entry_fee + p.amount * p.stop_loss * exit_cost_rate
         positions.append(
             {
                 "symbol": symbol,
@@ -81,6 +86,10 @@ def make_snapshot(
                 "size_pct": notional / equity * 100.0 if equity else None,
                 "margin": p.entry_price * p.amount / p.leverage,
                 "leverage": p.leverage,
+                "liquidation": p.liquidation_price,
+                "strategy": p.strategy,
+                "initial_stop": p.initial_stop,
+                "stop_kind": p.stop_kind,
                 "risk_quote": risk_quote,
                 "risk_pct": risk_quote / equity * 100.0 if equity else None,
                 "entry_price": p.entry_price,
@@ -126,6 +135,8 @@ def make_snapshot(
         "positions": positions,
         "trades": [t.to_dict() for t in reversed(trades[-MAX_TRADES:])],
         "stats": compute_stats(trades),
+        "analytics": analyze(trades, history, tz),
         "equity_history": downsample(history),
         "ai": ai,
+        "market": market or [],
     }

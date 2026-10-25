@@ -79,6 +79,11 @@ class CcxtDataFeed:
         df = ohlcv_to_df(rows)
         return drop_incomplete_candle(df, timeframe)
 
+    def fetch_chart(self, symbol: str, timeframe: str, limit: int) -> pd.DataFrame:
+        """Fuer den Chart: die letzten Kerzen inklusive der noch laufenden."""
+        rows = self.exchange.fetch_ohlcv(symbol, timeframe=timeframe, limit=min(limit, self.MAX_PER_REQUEST))
+        return ohlcv_to_df(rows)
+
     def fetch_ohlcv_range(self, symbol: str, timeframe: str, since_ms: int, until_ms: int | None = None) -> pd.DataFrame:
         until_ms = until_ms or int(time.time() * 1000)
         step_ms = timeframe_seconds(timeframe) * 1000

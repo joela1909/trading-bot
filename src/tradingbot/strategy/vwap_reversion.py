@@ -4,7 +4,7 @@ import pandas as pd
 
 from ..indicators import ema, session_vwap
 from ..session import session_day_key
-from .base import WARMUP_FACTOR, Strategy
+from .base import WARMUP_FACTOR, Strategy, fmt_price
 
 MIN_BARS_INTO_DAY = 4
 
@@ -19,6 +19,12 @@ class VwapReversionStrategy(Strategy):
     short_reason = "Kurs deutlich ueber dem Tages-VWAP"
     cover_reason = "Kurs zurueck am Tages-VWAP"
     param_grid = {"vwap_dev_atr": [1.0, 1.5, 2.0, 3.0], "trend_ema": [0, 200]}
+    chart_lines = [
+        ("vwap", "Tages-VWAP", "main"),
+        ("vwap_lower", "Long-Einstieg", "long"),
+        ("vwap_upper", "Short-Einstieg", "short"),
+        ("ema_trend", "Trend-EMA", "trend"),
+    ]
 
     @property
     def warmup_bars(self) -> int:
@@ -30,6 +36,9 @@ class VwapReversionStrategy(Strategy):
         day = session_day_key(df["timestamp"], self.session.timezone)
         df["vwap"] = session_vwap(df, day)
         df["bars_into_day"] = df.groupby(day.to_numpy()).cumcount()
+        dev = self.p("vwap_dev_atr", 2.0)
+        df["vwap_lower"] = df["vwap"] - dev * df["atr"]
+        df["vwap_upper"] = df["vwap"] + dev * df["atr"]
         trend = self.p("trend_ema", 0)
         if trend > 0:
             df["ema_trend"] = ema(df["close"], trend)
@@ -45,6 +54,30 @@ class VwapReversionStrategy(Strategy):
             buy = buy & (df["close"] > df["ema_trend"]).to_numpy()
         sell = (df["close"] >= df["vwap"]).to_numpy() & df["atr"].notna().to_numpy()
         return buy, sell
+
+    def explain(self, df, i=-1):
+        r = df.iloc[i]
+        c, v, a = float(r["close"]), float(r["vwap"]), float(r["atr"])
+        if a != a or a <= 0:
+            return ["Indikatoren laden noch (Warmup)"]
+        dev = self.p("vwap_dev_atr", 2.0)
+        out = [f"Kurs {fmt_price(c)}, Tages-VWAP {fmt_price(v)}, Abstand {(c - v) / a:+.2f} ATR (1 ATR = {fmt_price(a)} = {a / c * 100:.3f} %)"]
+        trend, long_ok, short_ok = self._trend_text(r)
+        out += trend
+        lo, hi = v - dev * a, v + dev * a
+        if not long_ok:
+            out.append(f"Long ab Kurs {fmt_price(lo)} ({-dev:+.1f} ATR): vom Trendfilter gesperrt")
+        else:
+            out.append(f"Long ab Kurs {fmt_price(lo)} ({-dev:+.1f} ATR): " + ("erfuellt" if c < lo else f"noch {fmt_price(c - lo)} entfernt"))
+        if self.cfg.allow_short:
+            if not short_ok:
+                out.append(f"Short ab Kurs {fmt_price(hi)} ({dev:+.1f} ATR): vom Trendfilter gesperrt")
+            else:
+                out.append(f"Short ab Kurs {fmt_price(hi)} ({dev:+.1f} ATR): " + ("erfuellt" if c > hi else f"noch {fmt_price(hi - c)} entfernt"))
+        if r["bars_into_day"] < MIN_BARS_INTO_DAY:
+            out.append(f"Neuer Tag: der VWAP ist erst {int(r['bars_into_day']) + 1} Kerzen alt, Einstiege ab {MIN_BARS_INTO_DAY + 1}")
+        out.append("Ausstieg: wenn der Kurs den VWAP wieder erreicht, sonst Stop-Loss, Take-Profit oder Handelsschluss")
+        return out
 
     def short_signals(self, df):
         dev = self.p("vwap_dev_atr", 2.0)

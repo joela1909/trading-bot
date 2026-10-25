@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import argparse
 import logging
+import os
 import signal
 import sys
 import threading
@@ -12,10 +13,11 @@ from pathlib import Path
 from .analysis import check_lookahead, check_recursive
 from .backtest import Backtester
 from .bot import TradingBot
-from .config import Settings, load_settings
-from .dashboard import DashboardServer
+from .config import Settings, load_base_config, load_settings
+from .dashboard import ApiError, DashboardServer
 from .data import CcxtDataFeed, load_csv, load_history
 from .exchange import LiveBroker, PaperBroker, PaperFuturesBroker
+from .keep_awake import keep_awake
 from .logging_setup import setup_logging
 from .notify import Notifier, TelegramNotifier
 from .risk import RiskManager
@@ -72,7 +74,7 @@ def build_bot(settings: Settings) -> TradingBot:
 
     # Futures bekommen einen eigenen Zustand, damit sich Spot- und Futures-Positionen nie vermischen
     state_path = state_dir / (f"state_{mode}_futures.json" if cfg.is_futures else f"state_{mode}.json")
-    return TradingBot(
+    bot = TradingBot(
         settings=settings,
         feed=feed,
         broker=broker,
@@ -82,6 +84,114 @@ def build_bot(settings: Settings) -> TradingBot:
         notifier=notifier,
         state_path=state_path,
     )
+    spot_signals = cfg.strategy.signal_source == "spot" and cfg.market != "spot"
+    if spot_signals:
+        # Signale und Chart aus Spot-Kursen (wie der TradingView-Chart auf dem Spot-Paar), gehandelt auf cfg.market
+        bot.signal_feed = CcxtDataFeed(cfg.exchange, market_type="spot")
+    bot.chart_feed = CcxtDataFeed(cfg.exchange, market_type="spot" if spot_signals else cfg.market)  # eigener Zugang fuer den Chart
+    return bot
+
+
+def _app_queries(bot: TradingBot, settings: Settings, stocks=None) -> dict:
+    from .app_settings import current
+
+    def chart(params: dict) -> dict:
+        symbol = params.get("symbol", "")
+        if symbol not in bot.cfg.symbols:
+            raise ApiError(f"Unbekanntes Paar {symbol!r}", 404)
+        tf = params.get("tf") or None
+        if tf is not None and tf not in bot.CHART_TIMEFRAMES:
+            raise ApiError(f"Unbekannter Zeitrahmen {tf!r}")
+        try:
+            since = int(params["since"]) if params.get("since") else None
+        except ValueError:
+            raise ApiError("since muss eine Zahl sein (ms)") from None
+        return bot.chart(symbol, tf, since)
+
+    queries = {
+        "chart": chart,
+        "settings": lambda _p: current(settings),
+    }
+    if stocks is not None:
+        queries.update({
+            "stocks": stocks.snapshot, "stocks-chart": stocks.chart,
+            "stocks-settings": lambda _p: current(settings, market="stocks"),
+        })
+    return queries
+
+
+def _app_commands(bot: TradingBot, settings: Settings, config_path: str, stocks=None) -> dict:
+    from .app_settings import reset, validate_and_save
+
+    def save(body: dict) -> dict:
+        try:
+            validate_and_save(settings, load_base_config(config_path), body)
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+        threading.Timer(1.0, bot.request_restart).start()  # erst antworten, dann neu starten
+        return {"ok": True, "restart": True}
+
+    def reset_settings(_body: dict) -> dict:
+        reset(settings, market="crypto")
+        threading.Timer(1.0, bot.request_restart).start()
+        return {"ok": True, "restart": True}
+
+    def delete_trades(body: dict) -> dict:
+        count = body.get("count")
+        if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 10000:
+            raise ApiError("count: ganze Zahl von 1 bis 10000 erwartet")
+        return bot.delete_oldest_trades(count)
+
+    def account_reset(body: dict) -> dict:
+        try:
+            return bot.request_account_reset(bool(body.get("clear_trades", False)))
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+
+    def fees_reprice(body: dict) -> dict:
+        try:
+            return bot.request_fee_reprice()
+        except ValueError as exc:
+            raise ApiError(str(exc)) from exc
+
+    commands = {"settings": save, "settings-reset": reset_settings, "trades-delete-oldest": delete_trades, "account-reset": account_reset,
+                "fees-reprice": fees_reprice}
+    if stocks is not None:
+        def save_stocks(body: dict) -> dict:
+            try:
+                validate_and_save(settings, load_base_config(config_path), body, market="stocks")
+            except ValueError as exc:
+                raise ApiError(str(exc)) from exc
+            threading.Timer(1.0, bot.request_restart).start()
+            return {"ok": True, "restart": True}
+
+        def reset_stocks(_body: dict) -> dict:
+            reset(settings, market="stocks")
+            threading.Timer(1.0, bot.request_restart).start()
+            return {"ok": True, "restart": True}
+
+        def stock_account_reset(body: dict) -> dict:
+            if stocks.bot is None:
+                raise ApiError("Aktienhandel laeuft nicht", 409)
+            try:
+                return stocks.bot.request_account_reset(bool(body.get("clear_trades", False)))
+            except ValueError as exc:
+                raise ApiError(str(exc)) from exc
+
+        def delete_stock_trades(body: dict) -> dict:
+            count = body.get("count")
+            if not isinstance(count, int) or isinstance(count, bool) or not 1 <= count <= 10000:
+                raise ApiError("count: ganze Zahl von 1 bis 10000 erwartet")
+            if stocks.bot is None:
+                raise ApiError("Aktienhandel laeuft nicht", 409)
+            return stocks.bot.delete_oldest_trades(count)
+
+        commands.update({
+            "stocks-pause": stocks.pause, "stocks-resume": stocks.resume, "stocks-settings": save_stocks,
+            "stocks-settings-reset": reset_stocks, "stocks-trades-delete-oldest": delete_stock_trades,
+            "stocks-account-reset": stock_account_reset,
+        })
+    return commands
 
 
 def cmd_run(args: argparse.Namespace) -> int:
@@ -103,29 +213,51 @@ def cmd_run(args: argparse.Namespace) -> int:
     signal.signal(signal.SIGINT, _handle_signal)
     signal.signal(signal.SIGTERM, _handle_signal)
 
+    # Aktien laufen als zweiter Bot im selben Prozess (nur Papierhandel, braucht Alpaca-Schluessel)
+    from .stocks import StockRunner
+
+    stocks = StockRunner(settings)
+    stocks.start()
+
     server = None
     if settings.bot.dashboard.enabled and not args.no_dashboard:
         port = args.port if args.port is not None else settings.bot.dashboard.port
         try:
-            server = DashboardServer(bot.get_snapshot, {"pause": bot.pause, "resume": bot.resume}, port=port)
+            hosts = list(settings.bot.dashboard.allowed_hosts) + settings.secrets.dashboard_host_list
+            in_container = os.environ.get("TRADINGBOT_CONTAINER") == "1"
+            bind = os.environ.get("DASHBOARD_BIND", "127.0.0.1") if in_container else "127.0.0.1"
+            server = DashboardServer(
+                bot.get_snapshot, {"pause": bot.pause, "resume": bot.resume}, host=bind, port=port,
+                allowed_hosts=hosts, allow_container_bind=in_container,
+                queries=_app_queries(bot, settings, stocks),
+                commands=_app_commands(bot, settings, args.config, stocks),
+            )
             server.start()
             log.info("Dashboard: %s (nur von diesem Rechner erreichbar)", server.url)
+            if hosts:
+                log.info("Dashboard ausserdem ueber Reverse-Proxy erlaubt fuer: %s", ", ".join(hosts))
             if args.open:
                 webbrowser.open(server.url)
         except OSError as exc:
             log.warning("Dashboard konnte nicht starten (%s). Der Bot laeuft ohne Dashboard weiter.", exc)
+    awake = settings.bot.keep_awake and keep_awake(True)
+    if awake:
+        log.info("Ruhemodus von Windows ist verhindert, solange der Bot laeuft")
     try:
         bot.run_forever()
     finally:
+        stocks.stop()
+        if awake:
+            keep_awake(False)
         if server is not None:
             server.stop()
-    return 0
+    return bot.exit_code
 
 
 def cmd_dashboard(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     cfg = settings.bot
-    state_path = Path(cfg.state_dir) / f"state_{settings.mode}.json"
+    state_path = Path(cfg.state_dir) / (f"state_{settings.mode}_futures.json" if cfg.is_futures else f"state_{settings.mode}.json")
     port = args.port if args.port is not None else cfg.dashboard.port
 
     def snapshot() -> dict:
@@ -331,7 +463,7 @@ def cmd_compare(args: argparse.Namespace) -> int:
 def cmd_status(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     cfg = settings.bot
-    state_path = Path(cfg.state_dir) / f"state_{settings.mode}.json"
+    state_path = Path(cfg.state_dir) / (f"state_{settings.mode}_futures.json" if cfg.is_futures else f"state_{settings.mode}.json")
     state = BotState.load(state_path)
     print(f"Modus: {settings.mode}   Boerse: {cfg.exchange}   Zustand: {state_path}")
     print(f"Handelstag: {state.day}   Tages-Startkapital: {state.day_start_equity}   Einstiege gestoppt: {state.entries_halted_for_day}")

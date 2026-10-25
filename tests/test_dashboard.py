@@ -81,8 +81,15 @@ def test_serves_page_assets_and_snapshot(server):
     status, body, headers = _request(server, "/")
     assert status == 200 and b"Trading Bot" in body
     assert "default-src 'self'" in headers["Content-Security-Policy"]
-    assert _request(server, "/app.js")[0] == 200
-    assert _request(server, "/style.css")[0] == 200
+    status, js, headers = _request(server, "/static/app.js")
+    assert status == 200 and headers["Content-Type"].startswith("text/javascript") and b"getJSON" in js
+    assert _request(server, "/static/app.css")[0] == 200
+    assert _request(server, "/static/vendor/lightweight-charts.standalone.production.js")[0] == 200
+    assert _request(server, "/static/fonts/ibm-plex-mono-latin-400-normal.woff2")[2]["Content-Type"] == "font/woff2"
+    assert _request(server, "/manifest.webmanifest")[0] == 200 and _request(server, "/sw.js")[0] == 200
+    assert _request(server, "/static/../dashboard.py")[0] == 404, "kein Zugriff ausserhalb von web/"
+    assert _request(server, "/static/%2e%2e/config.py")[0] == 404
+    assert _request(server, "/api/health")[0] == 200
     status, body, _ = _request(server, "/api/snapshot")
     assert status == 200 and json.loads(body) == {"ok": True}
     assert _request(server, "/nope")[0] == 404
@@ -130,3 +137,29 @@ def test_pause_button_flow_end_to_end(settings, tmp_path):
         assert json.loads(_request(srv, "/api/resume", "POST", headers)[1])["paused"] is False
     finally:
         srv.stop()
+
+
+def test_allowed_public_host_behind_proxy():
+    calls = []
+    srv = DashboardServer(lambda: {"ok": True}, {"pause": lambda: calls.append("p") or {"paused": True}}, port=0,
+                          allowed_hosts=["203-0-113-10.sslip.io", " "])
+    srv.start()
+    try:
+        assert srv.host == "127.0.0.1", "gebunden wird weiter nur an Loopback"
+        assert _request(srv, "/api/snapshot", headers={"Host": "203-0-113-10.sslip.io"})[0] == 200
+        assert _request(srv, "/api/snapshot", headers={"Host": "203-0-113-10.SSLIP.io:443"})[0] == 200
+        assert _request(srv, "/api/snapshot", headers={"Host": "evil.example"})[0] == 403
+        ok = {"X-Dashboard": "1", "Host": "203-0-113-10.sslip.io", "Origin": "https://203-0-113-10.sslip.io"}
+        assert _request(srv, "/api/pause", "POST", ok)[0] == 200
+        bad = {"X-Dashboard": "1", "Host": "203-0-113-10.sslip.io", "Origin": "https://evil.example"}
+        assert _request(srv, "/api/pause", "POST", bad)[0] == 403
+        assert calls == ["p"]
+    finally:
+        srv.stop()
+
+
+def test_dashboard_hosts_from_env(monkeypatch):
+    from tradingbot.config import Secrets
+
+    monkeypatch.setenv("DASHBOARD_HOSTS", "a.sslip.io, b.example ,")
+    assert Secrets(_env_file=None).dashboard_host_list == ["a.sslip.io", "b.example"]

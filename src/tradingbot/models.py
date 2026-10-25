@@ -64,6 +64,13 @@ class Position:
     exchange_stop: float | None = None
     side: str = "long"  # long | short
     leverage: float = 1.0
+    strategy: str = ""  # ausloesende Strategie(n), mehrere mit "+" verbunden
+    initial_stop: float | None = None  # Stop beim Einstieg
+    stop_kind: str = "initial"  # woher der aktuelle Stop kommt: initial | line | trailing
+
+    def set_stop(self, value: float, kind: str) -> None:
+        self.stop_loss = value
+        self.stop_kind = kind
 
     @property
     def is_short(self) -> bool:
@@ -76,6 +83,12 @@ class Position:
     def value(self, price: float) -> float:
         """Wert der Position im Konto: gebundene Sicherheit plus Kursgewinn. Spot-Long: Menge * Kurs."""
         return self.entry_price * self.amount / self.leverage + self.unrealized(price)
+
+    @property
+    def liquidation_price(self) -> float | None:
+        from .risk import liquidation_price
+
+        return liquidation_price(self.entry_price, self.side, self.leverage)
 
     def stop_hit(self, price: float) -> bool:
         return price >= self.stop_loss if self.is_short else price <= self.stop_loss
@@ -106,6 +119,10 @@ class Trade:
     closed_at: str
     reason: str
     side: str = "long"
+    strategy: str = ""  # ausloesende Strategie(n), mehrere mit "+" verbunden
+    leverage: float | None = None  # Hebel des Trades (None = vor dieser Aufzeichnung)
+    initial_stop: float | None = None  # Stop beim Einstieg
+    stop_kind: str = ""  # bei Stop-Ausstieg: initial | line | trailing
 
     def to_dict(self) -> dict:
         return asdict(self)

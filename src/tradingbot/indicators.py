@@ -29,6 +29,29 @@ def atr(df: pd.DataFrame, period: int = 14) -> pd.Series:
     return tr.ewm(alpha=1.0 / period, adjust=False, min_periods=period).mean()
 
 
+def adx(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Average Directional Index nach Wilder: Trendstaerke 0-100, unabhaengig von der Richtung."""
+    h, lo, c = df["high"], df["low"], df["close"]
+    up, down = h.diff(), -lo.diff()
+    plus = ((up > down) & (up > 0)) * up
+    minus = ((down > up) & (down > 0)) * down
+    tr = pd.concat([h - lo, (h - c.shift()).abs(), (lo - c.shift()).abs()], axis=1).max(axis=1)
+    a = 1.0 / period
+    atr_w = tr.ewm(alpha=a, adjust=False).mean()
+    pdi = 100 * plus.ewm(alpha=a, adjust=False).mean() / atr_w
+    mdi = 100 * minus.ewm(alpha=a, adjust=False).mean() / atr_w
+    dx = 100 * (pdi - mdi).abs() / (pdi + mdi).replace(0, float("nan"))
+    return dx.ewm(alpha=a, adjust=False).mean()
+
+
+def choppiness(df: pd.DataFrame, period: int = 14) -> pd.Series:
+    """Choppiness Index 0-100: hoch (ueber ~60) = seitwaerts, niedrig (unter ~40) = klarer Trend."""
+    h, lo, c = df["high"], df["low"], df["close"]
+    tr = pd.concat([h - lo, (h - c.shift()).abs(), (lo - c.shift()).abs()], axis=1).max(axis=1)
+    span = h.rolling(period).max() - lo.rolling(period).min()
+    return 100 * np.log10(tr.rolling(period).sum() / span.replace(0, float("nan"))) / np.log10(period)
+
+
 def sma(series: pd.Series, period: int) -> pd.Series:
     return series.rolling(period, min_periods=period).mean()
 

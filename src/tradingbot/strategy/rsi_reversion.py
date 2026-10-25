@@ -16,6 +16,7 @@ class RsiReversionStrategy(Strategy):
     short_reason = "RSI ueberkauft"
     cover_reason = "RSI abgekuehlt"
     param_grid = {"rsi_buy": [25, 30, 35], "rsi_sell": [50, 60, 70], "trend_ema": [0, 200]}
+    chart_lines = [("ema_trend", "Trend-EMA", "trend")]
 
     @property
     def warmup_bars(self) -> int:

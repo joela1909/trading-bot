@@ -4,6 +4,7 @@ import json
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import remote_state
 from .models import Position, Trade
 
 
@@ -56,12 +57,15 @@ class BotState:
         path = Path(path)
         path.parent.mkdir(parents=True, exist_ok=True)
         tmp = path.with_suffix(path.suffix + ".tmp")
-        tmp.write_text(json.dumps(self.to_dict(), indent=2, ensure_ascii=False), encoding="utf-8")
+        text = json.dumps(self.to_dict(), indent=2, ensure_ascii=False)
+        tmp.write_text(text, encoding="utf-8")
         tmp.replace(path)
+        remote_state.push(path, text)
 
     @classmethod
     def load(cls, path: str | Path) -> "BotState":
         path = Path(path)
+        remote_state.pull_if_missing(path)
         if not path.exists():
             return cls()
         return cls.from_dict(json.loads(path.read_text(encoding="utf-8")))

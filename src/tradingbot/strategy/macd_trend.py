@@ -16,6 +16,7 @@ class MacdTrendStrategy(Strategy):
     short_reason = "MACD kreuzt nach unten"
     cover_reason = "MACD kreuzt nach oben"
     param_grid = {"macd_fast": [8, 12], "macd_slow": [21, 26], "macd_signal": [9], "trend_ema": [0, 200]}
+    chart_lines = [("ema_trend", "Trend-EMA", "trend")]
 
     @classmethod
     def valid_params(cls, params: dict) -> bool:

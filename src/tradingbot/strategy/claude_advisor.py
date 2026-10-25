@@ -18,6 +18,7 @@ class ClaudeAdvisorStrategy(Strategy):
 
     name = "claude_advisor"
     live_only = True
+    chart_lines = [("ema_fast", "EMA schnell", "main"), ("ema_slow", "EMA langsam", "trend")]
 
     def __init__(self, cfg: StrategyConfig, ai: AiConfig, api_key: str = "", client=None):
         super().__init__(cfg)
@@ -58,8 +59,9 @@ class ClaudeAdvisorStrategy(Strategy):
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence:.2f}")
                 return Decision(Signal.HOLD, f"KI-Kauf verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)
             self.advisor.record(symbol, d, applied=True)
-            stop = close - self.cfg.stop_atr_mult * atr_value
-            tp = close + self.cfg.take_profit_atr_mult * atr_value if self.cfg.take_profit_atr_mult > 0 else None
+            stop = close - self.stop_distance(close, atr_value)
+            target = self.target_distance(close, atr_value)
+            tp = close + target if target is not None else None
             return Decision(Signal.BUY, f"KI: {d.reason}", stop_loss=stop, take_profit=tp, atr=atr_value)
         if d.action == "sell" and position is not None:
             if d.confidence < self.ai.min_confidence_exit:

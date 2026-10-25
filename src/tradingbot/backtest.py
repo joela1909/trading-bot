@@ -9,7 +9,7 @@ import pandas as pd
 from .config import DaytradingConfig, PaperConfig, ProtectionConfig, StrategyConfig
 from .models import MarketLimits, Position, Trade
 from .protections import Protections
-from .risk import RiskManager
+from .risk import RiskManager, cap_stop
 from .session import Session
 from .strategy import Strategy
 
@@ -106,6 +106,7 @@ class Backtester:
             raise ValueError("Leerer Zeitraum fuer den Backtest")
 
         ts = df["timestamp"].to_numpy()
+        open_ = df["open"].tolist()
         high = df["high"].tolist()
         low = df["low"].tolist()
         close = df["close"].tolist()
@@ -114,12 +115,26 @@ class Backtester:
         sell = sell_sig.tolist()
         short = short_sig.tolist() if allow_short else None
         cover = cover_sig.tolist() if allow_short else None
+        line_cache: dict = {}
+
+        def line_values(col):
+            # Spalte einer Trailing-Linie, einmal je Lauf in eine Liste
+            if col is None or col not in df.columns:
+                return None
+            if col not in line_cache:
+                line_cache[col] = df[col].tolist()
+            return line_cache[col]
+
+        trail_line = None
 
         fee_rate, slip = self.fee_rate, self.slip
         stop_mult = self.scfg.stop_atr_mult
         tp_mult = self.scfg.take_profit_atr_mult
         trailing = self.scfg.trailing_stop
         lev = self.leverage
+        min_ratio = self.risk.cfg.min_target_cost_ratio
+        round_trip = 2.0 * (fee_rate + slip)  # als Anteil, nicht Prozent
+        strat = self.strategy
 
         tf_ms = int(np.median(np.diff(ts[: min(len(ts), 500)]))) if len(ts) > 1 else 3_600_000
         prot = Protections(self.protections_cfg, tf_ms) if self.protections_cfg is not None else None
@@ -157,7 +172,8 @@ class Backtester:
             total_fees += fee
             pnl = gross - fees
             trades.append(
-                Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason, p.side)
+                Trade(symbol, p.amount, p.entry_price, price, pnl, pnl / (p.entry_price * p.amount) * 100.0, fees, p.opened_at, _ts(ms), reason, p.side, p.strategy,
+                      p.leverage, p.initial_stop, p.stop_kind if reason.startswith("stop_loss") else "")
             )
             if prot is not None:
                 prot.on_exit(symbol, reason, ms)
@@ -176,10 +192,15 @@ class Backtester:
                 out = (1 + slip) if is_short else (1 - slip)  # Kursabweichung beim Schliessen
                 exit_price = None
                 reason = ""
+                # Liegt der Kurs schon bei Eroeffnung der Kerze jenseits von Stop oder Ziel, gilt der Eroeffnungskurs.
+                # Sonst rechnet der Backtest zu guenstig, vor allem mit engem Trailing-Stop auf grossen Kerzen.
+                o = open_[i]
                 if (high[i] >= pos.stop_loss) if is_short else (low[i] <= pos.stop_loss):
-                    exit_price, reason = pos.stop_loss * out, "stop_loss"
+                    fill = max(pos.stop_loss, o) if is_short else min(pos.stop_loss, o)
+                    exit_price, reason = fill * out, "stop_loss"
                 elif pos.take_profit is not None and ((low[i] <= pos.take_profit) if is_short else (high[i] >= pos.take_profit)):
-                    exit_price, reason = pos.take_profit * out, "take_profit"
+                    fill = min(pos.take_profit, o) if is_short else max(pos.take_profit, o)
+                    exit_price, reason = fill * out, "take_profit"
                 elif dt is not None and (day[i] != pos_day or minute[i] >= flat_min):
                     exit_price, reason = c * out, "session_end"
                 elif dt is not None and max_hold_ms and int(ts[i]) - pos_ts >= max_hold_ms:
@@ -191,14 +212,26 @@ class Backtester:
                     pos = None
                     if dt is not None and day_start_eq > 0 and (day_start_eq - cash) / day_start_eq >= max_daily_loss:
                         halted = True
+                elif trailing and trail_line is not None:
+                    # Stop an der Linie der Strategie nachziehen, nur in Richtung der Position
+                    v = trail_line[i]
+                    if v == v:
+                        if is_short and v > c and v < pos.stop_loss:
+                            pos.set_stop(v, "line")
+                        elif not is_short and v < c and v > pos.stop_loss:
+                            pos.set_stop(v, "line")
                 elif trailing and a == a and a > 0:
                     if is_short:
                         if low[i] < pos.highest_price:
                             pos.highest_price = low[i]
-                            pos.stop_loss = min(pos.stop_loss, self.strategy.trailing_stop_short(pos.highest_price, a))
+                            ns = self.strategy.trailing_stop_short(pos.highest_price, a)
+                            if ns < pos.stop_loss:
+                                pos.set_stop(ns, "trailing")
                     elif high[i] > pos.highest_price:
                         pos.highest_price = high[i]
-                        pos.stop_loss = max(pos.stop_loss, self.strategy.trailing_stop(pos.highest_price, a))
+                        ns = self.strategy.trailing_stop(pos.highest_price, a)
+                        if ns > pos.stop_loss:
+                            pos.set_stop(ns, "trailing")
             elif (
                 (buy[i] or (allow_short and short[i]))
                 and a == a
@@ -217,15 +250,20 @@ class Backtester:
                 side = "long" if buy[i] else "short"
                 sign = 1 if buy[i] else -1
                 entry = c * (1 + sign * slip)
-                stop = entry - sign * stop_mult * a
-                amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev)
+                trig = strat.trigger_at(df, i, side)
+                plan_stop, tp = strat.entry_plan(df, i, side, entry, a)
+                # Kostenfilter: Ziel (ohne Ziel: Stop-Abstand) muss ein Vielfaches der Kosten sein
+                target = abs(tp - entry) if tp is not None else abs(entry - plan_stop)
+                worth = min_ratio <= 0 or not strat.cost_check(trig) or target / entry >= min_ratio * round_trip
+                stop, _ = cap_stop(entry, plan_stop, side, lev)
+                amount = self.risk.position_size(cash, cash, entry, stop, self.limits, side=side, leverage=lev) if worth else 0.0
                 if amount > 0:
                     notional = amount * entry
                     fee = notional * fee_rate
                     cash -= notional / lev + fee
                     total_fees += fee
-                    tp = entry + sign * tp_mult * a if tp_mult > 0 else None
-                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev)
+                    pos = Position(symbol, amount, entry, stop, tp, _ts(int(ts[i])), entry, fee, a, side=side, leverage=lev, strategy=trig, initial_stop=stop)
+                    trail_line = line_values(strat.trail_line_for(trig))
                     entries_today += 1
                     pos_day = day[i] if dt is not None else None
                     pos_ts = int(ts[i])

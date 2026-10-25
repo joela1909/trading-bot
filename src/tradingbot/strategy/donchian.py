@@ -15,6 +15,7 @@ class DonchianStrategy(Strategy):
     short_reason = "Ausbruch unter das Tief der letzten Kerzen"
     cover_reason = "Schlusskurs ueber dem Hoch der letzten Kerzen"
     param_grid = {"donchian_entry": [20, 40, 80], "donchian_exit": [10, 20]}
+    chart_lines = [("don_high", "Ausbruch Hoch (Long)", "long"), ("don_low_entry", "Ausbruch Tief (Short)", "short")]
 
     @property
     def warmup_bars(self) -> int:

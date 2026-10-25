@@ -16,6 +16,7 @@ class EmaCrossStrategy(Strategy):
     short_reason = "EMA-Kreuz nach unten"
     cover_reason = "EMA-Kreuz nach oben"
     param_grid = {"fast_ema": [10, 20, 30], "slow_ema": [50, 100, 200]}
+    chart_lines = [("ema_fast", "EMA schnell", "main"), ("ema_slow", "EMA langsam", "trend")]
 
     @classmethod
     def valid_params(cls, params: dict) -> bool:

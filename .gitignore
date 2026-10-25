@@ -37,3 +37,9 @@ Thumbs.db
 # Bot-Laufzeitdaten
 state/
 reports/
+
+# eigene Server-Adresse fuer den Dashboard-Tunnel
+server.txt
+
+# Zugangsdaten und Zertifikate des oeffentlichen Dashboards (Server)
+caddy/

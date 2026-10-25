@@ -185,3 +185,18 @@ def test_comparison_runs_with_every_metric(metric):
     cmp = run_comparison(data, ["ema_cross", "donchian"], StrategyConfig(), RiskConfig(), PaperConfig(), "1h", metric=metric, min_trades=5)
     assert cmp.metric == metric and len(cmp.outcomes) == 2
     assert metric in {"sharpe", "sortino", "profit"} and "Auswahlzeitraum" in format_report(cmp)
+
+
+def test_tsmom_enters_only_on_turn_and_has_no_lookahead():
+    from tradingbot.analysis import check_lookahead, check_recursive
+    from tradingbot.config import StrategyConfig
+    from tradingbot.strategy import build_strategy
+    from tradingbot.synthetic import make_series
+
+    s = build_strategy(StrategyConfig(name="tsmom", allow_short=True, mom_lookback=20), timeframe="1h")
+    df = s.prepare(make_series("trend", 3000, 7))
+    buy, sell = s.signals(df)
+    up = df["mom_up"].to_numpy()
+    assert buy.sum() > 0 and all(up[i] and not up[i - 1] for i in buy.nonzero()[0])
+    assert check_lookahead(s, make_series("trend", 3000, 7), checks=15).ok
+    assert check_recursive(s, make_series("trend", 3000, 7), checks=15).ok

@@ -34,3 +34,29 @@ def test_backtest_rejects_too_little_data(small_strategy_cfg):
     bt = Backtester(build_strategy(small_strategy_cfg), RiskManager(RiskConfig()), small_strategy_cfg, PaperConfig())
     with pytest.raises(ValueError):
         bt.run(make_ohlcv([100.0] * 5), "BTC/USDT")
+
+
+def test_stop_gap_fills_at_open_not_at_stop():
+    import pandas as pd
+
+    from tradingbot.backtest import Backtester
+    from tradingbot.config import PaperConfig, RiskConfig, StrategyConfig
+    from tradingbot.risk import RiskManager
+    from tradingbot.strategy import build_strategy
+
+    cfg = StrategyConfig(name="ema_cross", trailing_stop=False, take_profit_atr_mult=0)
+    strat = build_strategy(cfg)
+    n = 600
+    closes = [100.0] * n
+    df = pd.DataFrame({"timestamp": [1_700_000_000_000 + i * 3_600_000 for i in range(n)], "open": closes, "high": [101.0] * n,
+                       "low": [99.0] * n, "close": closes, "volume": 1.0})
+    # Kerze 250 springt unter den Stop: Eroeffnung 90, Stop lag bei 95
+    df.loc[550, ["open", "high", "low", "close"]] = [90.0, 91.0, 89.0, 90.5]
+    df = strat.prepare(df)
+    buy = [False] * n
+    buy[540] = True
+    sell = [False] * n
+    bt = Backtester(strat, RiskManager(RiskConfig(min_order_quote=0)), cfg, PaperConfig(fee_pct=0, slippage_pct=0))
+    r = bt.run(df, "X", start=500, prepared=True, signals=(pd.Series(buy).to_numpy(), pd.Series(sell).to_numpy()))
+    t = r.trades[0]
+    assert t.reason == "stop_loss" and t.exit_price == 90.0, t

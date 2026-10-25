@@ -16,6 +16,7 @@ class BollingerReversionStrategy(Strategy):
     short_reason = "Kurs ueber dem oberen Bollinger-Band"
     cover_reason = "Kurs an der Mittellinie"
     param_grid = {"bb_period": [20, 40], "bb_std": [2.0, 2.5], "trend_ema": [0, 200]}
+    chart_lines = [("bb_mid", "Mittellinie", "main"), ("bb_lower", "Unteres Band (Long)", "long"), ("bb_upper", "Oberes Band (Short)", "short"), ("ema_trend", "Trend-EMA", "trend")]
 
     @property
     def warmup_bars(self) -> int:

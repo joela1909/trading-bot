@@ -21,9 +21,14 @@ und begrenzt das Risiko pro Trade und pro Tag.
   Uhrzeiten in deiner Zeitzone inkl. Sommerzeit. Gilt auch für den KI-Bot. Backtest und Vergleich nutzen dieselben Regeln.
 - **Short-Positionen** über USDT-Perpetual-Futures (`market: futures`, `strategy.allow_short: true`), Hebel einstellbar,
   Standard 1. Alle Strategien haben gespiegelte Short-Signale. Futures laufen bisher nur im Papierhandel.
+- **Alle Strategien gleichzeitig** (`ensemble`, Standard): Jede Strategie gibt bei jeder Kerze ihre Stimme ab,
+  ein Schiedsrichter steigt ein, wenn genug Strategien dieselbe Richtung sagen (`min_votes`). Backtestbar wie jede
+  Strategie. Später soll Claude die Rolle des Schiedsrichters übernehmen können.
+  Mit `solo_member` reicht das Signal einer ausgewählten Strategie allein, die anderen Stimmen können es nicht aufhalten.
 - **Sieben Strategien**, alle mit ATR-basiertem Stop-Loss, Take-Profit und Trailing-Stop.
   Für den Tageshandel: `vwap_reversion` (Kauf deutlich unter dem Tages-VWAP, Verkauf am VWAP) und
-  `opening_range` (Ausbruch über die Eröffnungsspanne ab `entry_start`). Außerdem `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
+  `opening_range` (Ausbruch aus der Eröffnungsspanne nach dem LuxAlgo-Indikator „Opening Range with Breakouts & Targets“,
+  diese Datei steht unter CC BY-NC-SA 4.0 statt MIT). Außerdem `ema_cross` (EMA-Kreuz mit RSI-Filter), `donchian` (Ausbruch), `macd_trend` (MACD-Kreuz),
   `rsi_reversion` und `bollinger_reversion` (Rückkehr zum Mittelwert). Gewählt wird in `config.yaml` unter `strategy.name`.
 - **KI-Bot** (`claude_advisor`): Claude entscheidet bei jeder neuen Kerze über Einstieg und Ausstieg. Positionsgröße,
   Stop-Loss und alle Risikogrenzen bleiben fest im Bot. Läuft getestet auf Bitget, siehe Abschnitt „KI-Bot für Bitget“.
@@ -52,10 +57,16 @@ Voraussetzung ist Python 3.11 oder neuer. Bei der Installation von Python unter 
 | Einmal installieren | `install.bat` | `./install.sh` |
 | Beste Strategie finden | `vergleich.bat` | `./vergleich.sh` |
 | Bot starten, Papierhandel | `start.bat` | `./start.sh` |
+| Bot im Dauerbetrieb (24/7, Neustart nach Absturz) | `start-24-7.bat` | `./start-24-7.sh` |
 | KI-Bot für Bitget starten | `start-ki.bat` | `./start-ki.sh` |
 
-`start.bat` öffnet das Dashboard automatisch im Browser. Beenden mit Strg+C. Der Rechner darf dabei nicht in
-den Ruhemodus gehen. Die Windows-Dateien sind nicht auf einem echten Windows-System getestet, die Mac/Linux-Skripte schon.
+`start.bat` öffnet das Dashboard automatisch im Browser. Beenden mit Strg+C.
+
+**Dauerbetrieb:** `start-24-7.bat` startet den Bot nach einem Absturz (z. B. Netzwerkfehler beim Start) nach 30 Sekunden
+neu und schreibt das nach `logs/neustarts.log`. Unter Windows verhindert der Bot den Ruhemodus, solange er läuft
+(`keep_awake: true`, ändert keine Energieeinstellung). Ein zugeklappter Laptop, ein Neustart von Windows oder ein
+abgeschalteter PC stoppen ihn trotzdem. Für echten 24/7-Betrieb ohne eigenen PC eignet sich ein kleiner Server mit Docker
+(siehe unten). Die Windows-Dateien sind nicht auf einem echten Windows-System getestet, die Mac/Linux-Skripte schon.
 
 ## Installation von Hand
 
@@ -94,13 +105,27 @@ Einen einzelnen Zyklus ausführen (z. B. zum Testen der Verbindung):
 tradingbot run --once
 ```
 
-## Dashboard
+## Die App
 
-Beim Start mit `tradingbot run` öffnet der Bot ein Dashboard unter **http://127.0.0.1:8765**.
-Es zeigt Kapital, Rendite, Tagesverlauf, Kapitalverlauf als Diagramm, offene Positionen mit
-aktuellem Gewinn/Verlust, die letzten Trades und die Kennzahlen. Der Modus (Papierhandel oder
-**LIVE**) steht dauerhaft im Kopf der Seite und im Tab-Titel. Die Seite aktualisiert sich alle 5 Sekunden
-und folgt dem Hell/Dunkel-Modus deines Systems.
+Beim Start öffnet der Bot seine App unter **http://127.0.0.1:8765** (auf dem Server bzw. Cloudflare unter der jeweiligen
+https-Adresse mit Passwort). Sie folgt dem Hell/Dunkel-Modus des Systems und hat fünf Seiten:
+
+| Seite | Inhalt |
+|---|---|
+| **Übersicht** | Kapital, heute, gesamt, realisiert. Je Paar die **Stimmen-Waage**: links die Short-, rechts die Long-Stimmen der Strategien, die Markierung zeigt, ab wie vielen Stimmen der Bot einsteigt. Offene Positionen mit Größe, Stop, Ziel und Risiko. Kapitalverlauf, Pause-Schalter |
+| **Chart** | Interaktiver Kerzenchart ([TradingView Lightweight Charts](https://www.tradingview.com/lightweight-charts/), lokal eingebunden): zoomen, verschieben, Fadenkreuz mit Kurs und Linienwerten. Linien der Strategien ein-/ausblenden, Trades als Pfeile auf Ein- und Ausstiegskurs, offene Position mit Einstieg, Stop und Ziel an der Preisachse. Darunter, warum der Bot gerade (nicht) einsteigt |
+| **Trades** | Alle abgeschlossenen Trades mit Größe, Kursen, Ergebnis und Grund, filterbar nach Paar |
+| **Strategien** | Je Paar die Stimme jeder Strategie (Long, Short, keine) und ob sie aussteigen würde |
+| **Einstellungen** | Paare, Zeitrahmen, Strategie bzw. Ensemble (Stimmen, Mitglieder), Shorts, Risiko, Handelszeiten |
+
+**Einstellungen in der App:** „Speichern und neu starten“ prüft alle Werte wie beim Start, speichert sie in
+`state/settings_override.yaml` (hat Vorrang vor `config.yaml`) und startet den Bot neu. Das klappt automatisch mit
+`start-24-7.bat`, Docker und Cloudflare. Mit `start.bat` musst du ihn danach selbst wieder starten.
+Modus (Papier/Live), Börse, Markt, Hebel und Schlüssel lassen sich in der App bewusst **nicht** ändern.
+„Auf config.yaml zurücksetzen“ löscht die App-Fassung.
+
+**Aufs Handy:** Die App ist eine PWA. Im Handy-Browser über „Zum Startbildschirm hinzufügen“ installieren, sie öffnet
+sich dann ohne Browserleiste.
 
 Der Button **Einstiege pausieren** stoppt nur neue Käufe. Offene Positionen laufen weiter mit
 Stop-Loss, Take-Profit und Trailing-Stop. Die Pause wird gespeichert und gilt nach einem Neustart weiter.
@@ -289,7 +314,9 @@ paper:
 
 ## Tageshandel
 
-Standardmäßig handelt der Bot nur innerhalb eines Tages, in `config.yaml` auf 1-Minuten-Kerzen, im KI-Bot auf 15-Minuten-Kerzen:
+In `config.yaml` handelt der Bot rund um die Uhr auf 1-Minuten-Kerzen (`entry_start: "00:00"`, `entry_end: "23:50"`,
+`flat_time: "24:00"`): Einstiege den ganzen Tag, um Mitternacht wird alles geschlossen und der Handelstag beginnt neu.
+Der KI-Bot handelt nur tagsüber auf 15-Minuten-Kerzen, etwa so:
 
 ```yaml
 timeframe: 1m
@@ -332,6 +359,8 @@ Alle Parameter stehen kommentiert in [`config.yaml`](config.yaml). Die wichtigst
 | allgemein | `exchange`, `symbols`, `timeframe` | Börse (ccxt-ID), Handelspaare, Kerzen-Zeitrahmen |
 | `strategy` | `fast_ema`, `slow_ema`, `rsi_max_entry` | Trendfilter und Überkauft-Schwelle |
 | `strategy` | `stop_atr_mult`, `take_profit_atr_mult`, `trailing_stop` | Stop-Loss, Take-Profit, Trailing |
+| `strategy` | `trailing_pct` | Trailing-Stop mit festem Abstand in % zum besten Kurs, wandert nur in Richtung der Position (0 = wie der Stop) |
+| `strategy` | `solo_member` | Ensemble: Signal dieser Strategie reicht allein |
 | `risk` | `risk_per_trade_pct` | Max. Verlust pro Trade in Prozent des Kapitals |
 | `risk` | `max_position_pct`, `max_open_positions` | Begrenzung der Positionsgröße und -anzahl |
 | `risk` | `max_daily_loss_pct` | Ab diesem Tagesverlust keine neuen Einstiege bis zum nächsten Tag |
@@ -359,14 +388,58 @@ Geheimnisse (API-Keys, Telegram-Token) gehören ausschließlich in `.env`, niema
 Der Bot handelt nur mit dem freien Guthaben in der Quote-Währung (`quote_currency`).
 Positionen, die du manuell verkaufst, erkennt er beim nächsten Start am Bestand und verwirft sie.
 
-## Dauerbetrieb mit Docker
+## Bot auf einem Server (läuft ohne deinen PC)
+
+> **Alternative ohne eigenen Server:** komplett auf Cloudflare (Container + Worker mit Passwort), siehe [cloudflare/README.md](cloudflare/README.md).
+
+Damit der Bot rund um die Uhr läuft, auch wenn dein PC aus ist, braucht er einen Server, der immer an ist.
+Ein kleiner Linux-Server (1–2 GB RAM genügen) kostet bei Anbietern wie Hetzner, Netcup oder Contabo einige Euro im Monat.
+
+**1. Server mieten:** Ubuntu 24.04 oder 22.04 wählen (Debian 12 geht auch), **Standort in der EU**, z. B. Deutschland
+oder Finnland. Binance sperrt Anfragen aus manchen Ländern, z. B. den USA. Beim Anlegen deinen SSH-Schlüssel
+hinterlegen (Windows: `ssh-keygen` im Terminal, dann den Inhalt von `%USERPROFILE%\.ssh\id_ed25519.pub` einfügen).
+
+**2. Einrichten**, als root auf dem Server (`ssh root@DEINE-IP`):
 
 ```bash
-docker compose up -d --build
-docker compose logs -f
+curl -fsSL https://raw.githubusercontent.com/joela1909/trading-bot/main/deploy/server-setup.sh | bash
 ```
 
-`state/` und `logs/` werden als Volumes gemountet, `config.yaml` wird read-only eingebunden.
+Das Skript installiert Docker und Git, holt den Code nach `~/trading-bot`, legt eine `.env` für den Papierhandel an
+und startet den Bot. Er startet nach Abstürzen und nach einem Neustart des Servers von selbst wieder.
+Am Ende fragt es, ob das Dashboard vom Handy aus erreichbar sein soll.
+
+**3. Dashboard vom Handy:** Mit „J“ (oder später `bash deploy/public-dashboard.sh`) richtet das Skript
+[Caddy](https://caddyserver.com) ein. Du bekommst eine Adresse wie `https://203-0-113-10.sslip.io`, einen Benutzer und
+ein zufälliges Passwort, das nur einmal angezeigt wird. Die Adresse im Handy-Browser öffnen, anmelden, fertig.
+
+- Caddy holt das HTTPS-Zertifikat selbst und fragt vor jeder Seite nach Benutzer und Passwort. Der Bot selbst bleibt
+  nur intern erreichbar und nimmt nur Anfragen für genau diese Adresse an.
+- Eigene Domain statt sslip.io: DNS-A-Eintrag auf die Server-IP, dann `DOMAIN=bot.deine-domain.de bash deploy/public-dashboard.sh`.
+- Neues Passwort: Skript erneut ausführen. Abschalten: `bash deploy/public-dashboard.sh --off`.
+- Die Ports 80 und 443 müssen offen sein. Hat dein Anbieter eine Firewall, dort freigeben.
+- Wer das Passwort kennt, kann das Dashboard sehen und neue Einstiege pausieren, aber nicht handeln oder Geld bewegen.
+
+**Ohne Passwort-Zugang:** auf dem PC `dashboard-server.bat` (Mac/Linux: `./dashboard-server.sh`) starten und
+`root@DEINE-IP` eingeben. Das baut einen verschlüsselten SSH-Tunnel auf und öffnet http://127.0.0.1:8766.
+
+Weitere Befehle auf dem Server:
+
+```bash
+cd ~/trading-bot
+docker compose logs -f          # Logs live ansehen
+bash deploy/update.sh           # neuesten Stand aus GitHub holen und neu starten
+docker compose down             # Bot stoppen
+nano config.yaml                # Einstellungen ändern, danach: docker compose restart
+```
+
+- `state/`, `logs/`, `data/` und `reports/` liegen auf dem Server und überstehen Updates. `config.yaml` wird nur gelesen.
+- Bisherigen Papierhandel mitnehmen (optional, Bot auf dem PC vorher beenden):
+  `scp -r state root@DEINE-IP:~/trading-bot/` und danach auf dem Server `docker compose restart`.
+- **Nicht gleichzeitig auf PC und Server laufen lassen.** Im Papierhandel ist das nur verwirrend, im Live-Handel
+  würde doppelt gehandelt.
+- Live-Handel auf dem Server: Schlüssel in `~/trading-bot/.env` eintragen (`nano .env`, Rechte nur Lesen und Handel,
+  keine Auszahlung, wenn möglich auf die IP des Servers beschränken), dann `docker compose restart`.
 
 ## Telegram-Benachrichtigungen
 
@@ -399,8 +472,10 @@ src/tradingbot/
 ├── ai.py             Anbindung an Claude für den KI-Bot
 ├── protections.py    Abkühlphase, Stop-Loss-Serie, Drawdown-Grenze
 ├── synthetic.py      Künstliche Kursreihen zum Testen des Werkzeugs
-├── dashboard.py      Lokaler Webserver (nur Loopback) für das Dashboard
-├── dashboard_page.py HTML, CSS und JavaScript des Dashboards
+├── dashboard.py      Webserver der App (Loopback, Host-/Origin-Prüfung, API)
+├── web/              Die App: index.html, app.js, app.css, PWA, Chart-Bibliothek, Schriften
+├── app_settings.py   Einstellungen aus der App: Prüfung, Speichern, Zurücksetzen
+├── remote_state.py   Zustand zusätzlich extern sichern (Cloudflare R2)
 ├── snapshot.py       Datenstand für das Dashboard (Kennzahlen, Positionen, Verlauf)
 ├── config.py         config.yaml + .env (pydantic)
 ├── data.py           Marktdaten über ccxt, CSV-Import
@@ -409,7 +484,7 @@ src/tradingbot/
 ├── risk.py           Positionsgröße, Limits
 ├── state.py          Persistenter Zustand
 ├── notify.py         Log- und Telegram-Benachrichtigungen
-└── strategy/         Strategie-Schnittstelle, sieben Strategien und die KI-Strategie
+└── strategy/         Strategie-Schnittstelle, sieben Strategien, Ensemble und die KI-Strategie
 ```
 
 ## Lizenz
