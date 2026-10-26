@@ -142,6 +142,11 @@ class ProtectionConfig(BaseModel):
     stoploss_guard_lock_candles: int = Field(default=12, ge=1)
     max_drawdown_pct: float = Field(default=20.0, ge=0)
     max_drawdown_lock_candles: int = Field(default=48, ge=1)
+    # Bilanz-Filter: vor jedem Einstieg spielt der Bot dieselbe Strategie auf den letzten `track_record_bars` Kerzen
+    # dieses Paars nach (wie die Time Machine). Haben ihre letzten `track_record_trades` Trades im Schnitt verloren,
+    # steigt er nicht ein (0 = aus). Weniger Trades in der Vorgeschichte: Einstieg erlaubt.
+    track_record_trades: int = Field(default=0, ge=0, le=50)
+    track_record_bars: int = Field(default=4320, ge=100, le=50000)
 
 
 class ExecutionConfig(BaseModel):
@@ -185,6 +190,10 @@ class StocksConfig(BaseModel):
     risk: dict = Field(default_factory=dict)
     protections: dict = Field(default_factory=dict)  # Abweichungen von protections oben
     daytrading: "DaytradingConfig" = Field(default_factory=_us_session)
+    # Scanner: taeglich die meistgehandelten Aktien zu `symbols` dazunehmen (0 = aus), wie trader-scanner
+    scanner_top: int = Field(default=0, ge=0, le=30)
+    # News-Sperre: kein Einstieg, wenn es in den letzten so vielen Minuten Schlagzeilen gab (0 = aus), wie trader-news
+    news_block_minutes: int = Field(default=0, ge=0, le=1440)
 
     @field_validator("symbols")
     @classmethod

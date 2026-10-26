@@ -79,6 +79,8 @@ class ProtectionsUpdate(_Strict):
     stoploss_guard_stops: int = Field(default=3, ge=0, le=20)
     # Abkuehlphase: so viele Kerzen nach einem Ausstieg kein neuer Einstieg im selben Paar (0 = aus)
     cooldown_candles: int | None = Field(default=None, ge=0, le=1000)
+    # Bilanz-Filter: die letzten so vielen Trades derselben Regel muessen im Schnitt im Plus sein (0 = aus)
+    track_record_trades: int | None = Field(default=None, ge=0, le=50)
 
 
 class FuturesUpdate(_Strict):
@@ -190,6 +192,7 @@ def current(settings: Settings, has_override: bool | None = None, market: str = 
                 "window_candles": b.protections.stoploss_guard_window_candles,
                 "lock_candles": b.protections.stoploss_guard_lock_candles,
                 "cooldown_candles": b.protections.cooldown_candles,
+                "track_record_trades": b.protections.track_record_trades,
             },
             "daytrading": {
                 "enabled": b.daytrading.enabled,
@@ -229,8 +232,10 @@ def validate_and_save(settings: Settings, base_config: dict, payload: dict, mark
     override = update.model_dump()
     if override.get("protections") is None:
         override.pop("protections", None)
-    elif override["protections"].get("cooldown_candles") is None:
-        override["protections"].pop("cooldown_candles", None)
+    else:
+        for key in ("cooldown_candles", "track_record_trades"):
+            if override["protections"].get(key) is None:
+                override["protections"].pop(key, None)
     if override.get("futures") is None:
         override.pop("futures", None)
     elif not stocks and not settings.bot.is_futures and override["futures"]["leverage"] > 1:

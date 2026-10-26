@@ -63,6 +63,11 @@ class TradingBot:
         self._chart_cache: dict = {}
         self._reset_request: bool | None = None
         self._fee_request = False
+        # Zusatzpruefung vor jedem Einstieg: (Paar) -> (erlaubt, Grund); z. B. News-Sperre bei Aktien
+        self.entry_guard = None
+        self._track_cache: dict[str, tuple[int, list[float]]] = {}
+        # wird zu Beginn jeder Runde aufgerufen, z. B. um die Aktienliste des Tages zu erneuern
+        self.before_cycle = None
         # Echtzeit: (Kerze, Richtung) des letzten Ausstiegs je Paar, "any" nach einem Einstieg
         self._acted_candle: dict[str, tuple[int, str]] = {}
         # Marktansicht fuers Dashboard: was der Bot je Paar zuletzt gesehen und entschieden hat
@@ -304,6 +309,38 @@ class TradingBot:
         log.warning("Konto-Reset angefordert (Trades loeschen: %s)", clear_trades)
         return {"ok": True, "pending": True, "positions": len(self.state.positions)}
 
+    def _track_record(self, symbol: str, df) -> tuple[bool, str]:
+        """Bilanz-Filter: dieselbe Strategie auf den Kerzen vor dem Signal nachspielen (Backtest mit den aktuellen
+        Einstellungen) und die letzten K Trades ansehen. Ergebnis je Paar und Kerze zwischengespeichert."""
+        k = self.cfg.protections.track_record_trades
+        if k <= 0:
+            return True, ""
+        last_ts = int(df["timestamp"].iloc[-1])
+        hit = self._track_cache.get(symbol)
+        if hit is None or hit[0] != last_ts:
+            from .backtest import Backtester
+
+            past = df.iloc[:-1].reset_index(drop=True)  # nur abgeschlossene Kerzen vor dem Signal
+            start = self.strategy.warmup_bars
+            pnl: list[float] = []
+            if len(past) > start + 10:
+                try:
+                    bt = Backtester(self.strategy, RiskManager(self.cfg.risk), self.cfg.strategy, self.cfg.paper,
+                                    daytrading=self.cfg.daytrading if self.session is not None else None,
+                                    leverage=self.cfg.leverage)
+                    pnl = [t.pnl_pct for t in bt.run(past, symbol, start=start, prepared=True).trades
+                           if t.reason != "end_of_data"]
+                except Exception as exc:  # noqa: BLE001
+                    log.warning("%s: Bilanz-Filter nicht berechenbar (%s), Einstieg erlaubt", symbol, exc)
+            self._track_cache[symbol] = hit = (last_ts, pnl)
+        pnl = hit[1][-k:]
+        if len(pnl) < k:
+            return True, ""
+        avg = sum(pnl) / len(pnl)
+        if avg > 0:
+            return True, ""
+        return False, f"Bilanz-Filter: die letzten {k} Trades dieser Regel im Schnitt {avg:+.2f} %".replace(".", ",")
+
     def request_fee_reprice(self) -> dict:
         """Neuberechnung der Gebuehren anfordern; laeuft zu Beginn der naechsten Runde im Bot-Thread."""
         if self.broker.name != "paper":
@@ -426,6 +463,11 @@ class TradingBot:
 
     # ------------------------------------------------------------------ cycle
     def run_once(self) -> float:
+        if self.before_cycle is not None:
+            try:
+                self.before_cycle()
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Vorbereitung der Runde fehlgeschlagen: %s", exc)
         if self._reset_request is not None:
             clear, self._reset_request = self._reset_request, None
             self._do_account_reset(clear)
@@ -474,6 +516,8 @@ class TradingBot:
         import pandas as pd
 
         need = self.strategy.warmup_bars + 10
+        if self.cfg.protections.track_record_trades > 0:
+            need += self.cfg.protections.track_record_bars  # Vorgeschichte fuer den Bilanz-Filter
         tf = self.cfg.timeframe
         cached = self._candles.get(symbol)
         if cached is not None and len(cached) >= need:
@@ -760,6 +804,16 @@ class TradingBot:
             log.info("%s: kein Einstieg, %s", symbol, why)
             self._status[symbol] = f"Kein Einstieg: {why}"
             return
+        if self.entry_guard is not None:
+            try:
+                allowed, why = self.entry_guard(symbol)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: Zusatzpruefung fehlgeschlagen (%s), Einstieg erlaubt", symbol, exc)
+                allowed = True
+            if not allowed:
+                log.info("%s: kein Einstieg, %s", symbol, why)
+                self._status[symbol] = f"Kein Einstieg: {why}"
+                return
         if not self.risk.can_open_new(len(self.state.positions)):
             log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
             self._status[symbol] = "Kein Einstieg: maximale Zahl offener Positionen erreicht"
@@ -780,6 +834,11 @@ class TradingBot:
         paper = self.cfg.paper
         idx = len(df) - 1
         trigger = self.strategy.trigger_at(df, idx, side)
+        ok, why = self._track_record(symbol, df)
+        if not ok:
+            log.info("%s: %s-Signal verworfen, %s", symbol, side, why)
+            self._status[symbol] = f"{side.capitalize()}-Signal verworfen: {why}"
+            return
         plan_stop, plan_tp = self.strategy.entry_plan(df, idx, side, price, decision.atr)
         worth_it, target_pct, cost_pct = self.risk.target_check(
             price, abs(plan_tp - price) if plan_tp is not None else abs(price - plan_stop), paper.fee_pct, paper.slippage_pct

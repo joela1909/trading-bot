@@ -18,6 +18,8 @@ from .models import MarketLimits
 log = logging.getLogger(__name__)
 
 DATA_URL = "https://data.alpaca.markets/v2"
+BETA_URL = "https://data.alpaca.markets/v1beta1"
+TICKER_RE = r"[A-Z]{1,5}(\.[A-Z])?"
 TIMEFRAMES = {"1m": "1Min", "5m": "5Min", "15m": "15Min", "1h": "1Hour", "4h": "4Hour", "1d": "1Day"}
 TRADING_SECONDS_PER_DAY = 16 * 3600  # IEX-Kerzen gibt es etwa von 4:00 bis 20:00 New York
 
@@ -37,8 +39,8 @@ class AlpacaDataFeed:
         self.http = session or requests.Session()
         self.http.headers.update({"APCA-API-KEY-ID": api_key, "APCA-API-SECRET-KEY": api_secret, "Accept": "application/json"})
 
-    def _get(self, path: str, params: dict | None = None) -> dict:
-        r = self.http.get(f"{DATA_URL}{path}", params=params or {}, timeout=self.timeout)
+    def _get(self, path: str, params: dict | None = None, base: str = DATA_URL) -> dict:
+        r = self.http.get(f"{base}{path}", params=params or {}, timeout=self.timeout)
         if r.status_code in (401, 403):
             raise AlpacaError("Alpaca lehnt die Schluessel ab (401/403). Bitte ALPACA_API_KEY und ALPACA_API_SECRET pruefen.")
         if r.status_code == 429:
@@ -102,6 +104,33 @@ class AlpacaDataFeed:
     def market_limits(self, symbol: str) -> MarketLimits:
         # ganze Stueck: Leerverkauf geht bei Alpaca nur mit ganzen Aktien
         return MarketLimits(min_amount=1.0, min_cost=1.0, amount_precision=0)
+
+    def most_actives(self, top: int = 10, min_price: float = 5.0) -> list[str]:
+        """Die meistgehandelten US-Aktien des Tages (nach Volumen), ohne Pennystocks unter `min_price`."""
+        import re
+
+        data = self._get("/screener/stocks/most-actives", {"by": "volume", "top": min(100, top * 3)}, base=BETA_URL)
+        out: list[str] = []
+        for row in data.get("most_actives") or []:
+            sym = str(row.get("symbol", "")).upper()
+            if not re.fullmatch(TICKER_RE, sym) or sym in out:
+                continue
+            try:
+                if self.fetch_price(sym) < min_price:
+                    continue
+            except AlpacaError:
+                continue
+            out.append(sym)
+            if len(out) >= top:
+                break
+        return out
+
+    def recent_news(self, symbol: str, minutes: int) -> list[str]:
+        """Schlagzeilen zu `symbol` aus den letzten `minutes` Minuten (Alpaca News, Benzinga)."""
+        start = datetime.now(timezone.utc) - timedelta(minutes=minutes)
+        data = self._get("/news", {"symbols": symbol, "start": start.strftime("%Y-%m-%dT%H:%M:%SZ"), "limit": 10,
+                                   "sort": "desc"}, base=BETA_URL)
+        return [str(n.get("headline", "")) for n in data.get("news") or []]
 
     def check(self) -> None:
         """Wirft AlpacaError, wenn die Schluessel nicht passen."""

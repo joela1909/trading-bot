@@ -91,3 +91,27 @@ def test_runner_without_keys_reports_problem(tmp_path):
     r.start()
     snap = r.snapshot()
     assert not snap["ready"] and "Alpaca" in snap["problem"] and snap["enabled"]
+
+
+def test_scanner_and_news_from_alpaca():
+    sess = FakeSession([{"most_actives": [{"symbol": "NVDA"}, {"symbol": "BRK.B"}, {"symbol": "ABR$D"}, {"symbol": "TSLA"}]},
+                        {"news": [{"headline": "Tesla beats earnings"}]}])
+    feed = AlpacaDataFeed("k", "s", session=sess)
+    assert feed.most_actives(2) == ["NVDA", "BRK.B"]
+    assert "screener/stocks/most-actives" in sess.calls[0][0]
+    assert feed.recent_news("TSLA", 30) == ["Tesla beats earnings"]
+    assert sess.calls[-1][1]["symbols"] == "TSLA" and "/v1beta1/news" in sess.calls[-1][0]
+
+
+def test_entry_guard_blocks_entry(settings, tmp_path):
+    from tests.test_bot import _first_buy_index, _make_bot
+
+    full = make_ohlcv(trend_closes())
+    from tradingbot.strategy import build_strategy
+
+    buy_i = _first_buy_index(build_strategy(settings.bot.strategy), full)
+    feed = FakeFeed(full.iloc[: buy_i + 1].reset_index(drop=True))
+    bot, _, _ = _make_bot(settings, feed, tmp_path)
+    bot.entry_guard = lambda s: (False, "News in den letzten 30 min: x")
+    bot.run_once()
+    assert not bot.state.positions and "News" in bot._status["BTC/USDT"]

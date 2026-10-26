@@ -370,3 +370,26 @@ def test_reprice_fees_recomputes_trades_capital_and_history(settings, tmp_path):
     assert abs(bot.state.equity_history[1][1] - round(1019.79 + old - new, 4)) < 1e-9
     assert abs(bot.state.day_start_equity - (1019.79 + old - new)) < 1e-9
     assert bot.reprice_fees()["changed"] == 0, "zweimal ausfuehren aendert nichts"
+
+
+def test_track_record_filter_blocks_after_losing_trades(settings, tmp_path, monkeypatch):
+    from types import SimpleNamespace
+
+    from tradingbot import backtest
+
+    feed = FakeFeed(make_ohlcv(trend_closes()))
+    bot, _, _ = _make_bot(settings, feed, tmp_path)
+    df = bot.strategy.prepare(make_ohlcv(trend_closes()))
+    assert bot._track_record("BTC/USDT", df) == (True, ""), "aus: immer erlaubt"
+    bot.cfg.protections.track_record_trades = 3
+    results = {"pnl": [2.0, -1.0, -0.5, -0.4]}
+    monkeypatch.setattr(backtest.Backtester, "run", lambda self, *a, **k: SimpleNamespace(
+        trades=[SimpleNamespace(pnl_pct=p, reason="stop_loss") for p in results["pnl"]]))
+    ok, why = bot._track_record("BTC/USDT", df)
+    assert not ok and "Bilanz-Filter" in why and "-0,63" in why
+    results["pnl"] = [-1.0, 0.5, 0.8, 0.3]
+    bot._track_cache.clear()
+    assert bot._track_record("BTC/USDT", df)[0]
+    results["pnl"] = [-1.0, -1.0]
+    bot._track_cache.clear()
+    assert bot._track_record("BTC/USDT", df)[0], "zu wenig Vorgeschichte: erlaubt"

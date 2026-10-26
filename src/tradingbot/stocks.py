@@ -6,6 +6,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from datetime import datetime
 from pathlib import Path
 
 from .alpaca import AlpacaDataFeed, AlpacaError, us_market_open
@@ -108,9 +109,37 @@ class StockRunner:
             log.warning("Aktien: %s", exc)
             return
         self.bot = bot
+        self._base_symbols = list(bot.cfg.symbols)
+        self._scan_day: str | None = None
+        if self.cfg.scanner_top > 0:
+            bot.before_cycle = self._refresh_universe
+        if self.cfg.news_block_minutes > 0:
+            bot.entry_guard = self._news_guard
         self.thread = threading.Thread(target=self._run, name="aktien", daemon=True)
         self.thread.start()
         log.info("Aktien-Bot gestartet: %s, %s", ", ".join(bot.cfg.symbols), bot.cfg.timeframe)
+
+    def _refresh_universe(self) -> None:
+        """Einmal je Handelstag nach 9:35 New York: meistgehandelte Aktien zur festen Liste dazunehmen."""
+        from zoneinfo import ZoneInfo
+
+        now = datetime.now(ZoneInfo("America/New_York"))
+        day = now.strftime("%Y-%m-%d")
+        if self._scan_day == day or now.weekday() >= 5 or (now.hour, now.minute) < (9, 35) or now.hour >= 16:
+            return
+        self._scan_day = day
+        scanned = self.bot.feed.most_actives(self.cfg.scanner_top)
+        keep = [s for s in self.bot.state.positions if s not in self._base_symbols]  # offene Positionen bleiben
+        symbols = list(dict.fromkeys(self._base_symbols + scanned + keep))
+        self.bot.cfg.symbols = symbols
+        self.scanned = scanned
+        log.info("Aktien-Scanner %s: %s", day, ", ".join(scanned) or "nichts gefunden")
+
+    def _news_guard(self, symbol: str) -> tuple[bool, str]:
+        news = self.bot.feed.recent_news(symbol, self.cfg.news_block_minutes)
+        if news:
+            return False, f"News in den letzten {self.cfg.news_block_minutes} min: {news[0][:80]}"
+        return True, ""
 
     def _run(self) -> None:
         try:

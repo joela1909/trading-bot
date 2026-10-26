@@ -1009,6 +1009,10 @@
     var cd = pr.cooldown_candles === undefined || pr.cooldown_candles === null ? 5 : pr.cooldown_candles;
     form.cooldownCandles = cd > 0 ? cd : 5;
     $('s-cooldown').checked = cd > 0;
+    form.trackTrades = pr.track_record_trades > 0 ? pr.track_record_trades : 3;
+    $('s-track').checked = pr.track_record_trades > 0;
+    $('s-trackhint').textContent = 'Bilanz-Filter: Vor jedem Einstieg spielt der Bot dieselbe Strategie auf den letzten Tagen dieses Paars nach. '
+      + 'Haben ihre letzten ' + form.trackTrades + ' Trades im Schnitt verloren, steigt er nicht ein. Im Test über 60 Tage: weniger als halb so viel Verlust, aber noch kein Gewinn.';
     $('s-cooldownhint').textContent = 'Abkühlphase: Nach einem Ausstieg steigt der Bot ' + form.cooldownCandles + ' Kerzen lang nicht wieder in dasselbe Paar ein. Aus heißt: sofortiger Wiedereinstieg möglich.';
     $('s-costhint').textContent = 'Kosten je Trade hin und zurück: ' + nf(v.costs_pct, 2) + ' %. Bei 2 braucht ein Trade also mindestens ' + nf(2 * v.costs_pct, 2) + ' % Ziel.';
     $('s-dt').checked = v.daytrading.enabled;
@@ -1121,7 +1125,8 @@
       futures: { leverage: parseFloat($('s-lev').value) || 1 },
       protections: {
         stoploss_guard_stops: $('s-slguard').checked ? (form.slguardStops || 3) : 0,
-        cooldown_candles: $('s-cooldown').checked ? (form.cooldownCandles || 5) : 0
+        cooldown_candles: $('s-cooldown').checked ? (form.cooldownCandles || 5) : 0,
+        track_record_trades: $('s-track').checked ? (form.trackTrades || 3) : 0
       },
       risk: {
         risk_per_trade_pct: parseFloat($('s-risk').value),
