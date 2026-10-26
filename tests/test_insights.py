@@ -50,3 +50,13 @@ def test_crypto_scanner_picks_most_active_perps():
     bot.cfg.symbols = ["X"]
     scan()
     assert bot.cfg.symbols == ["X"], "erst nach 6 Stunden wieder"
+
+
+def test_crypto_scanner_keeps_saved_settings_unchanged(settings):
+    from tradingbot.config import BotConfig
+
+    cfg = BotConfig(market="futures", symbols=["ETH/USDT"])
+    bot = SimpleNamespace(cfg=cfg, state=SimpleNamespace(positions={}))
+    fut = SimpleNamespace(fetch_tickers=lambda: {"SUI/USDT:USDT": {"quoteVolume": 5e9}})
+    CryptoScanner(bot, fut, None, 1)()
+    assert bot.cfg.symbols == ["ETH/USDT:USDT", "SUI/USDT:USDT"] and cfg.symbols == ["ETH/USDT:USDT"]

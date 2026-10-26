@@ -124,5 +124,10 @@ class CryptoScanner:
         self._last = time.time()
         self.scanned = crypto_most_active(self.futures_exchange, self.spot_exchange, self.top, self.bot.cfg.quote_currency)
         keep = [s for s in self.bot.state.positions if s not in self.base]
-        self.bot.cfg.symbols = list(dict.fromkeys(self.base + self.scanned + keep))
+        symbols = list(dict.fromkeys(self.base + self.scanned + keep))
+        if hasattr(self.bot.cfg, "model_copy"):
+            # eigene Kopie: die gespeicherten Einstellungen (App) behalten die feste Liste
+            self.bot.cfg = self.bot.cfg.model_copy(update={"symbols": symbols})
+        else:
+            self.bot.cfg.symbols = symbols
         log.info("Krypto-Scanner: %s", ", ".join(s.split("/")[0] for s in self.scanned) or "nichts gefunden")

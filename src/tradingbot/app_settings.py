@@ -88,7 +88,7 @@ class FuturesUpdate(_Strict):
 
 
 class SettingsUpdate(_Strict):
-    symbols: list[str] = Field(min_length=1, max_length=10)
+    symbols: list[str] = Field(min_length=1, max_length=20)
     timeframe: Literal["1m", "5m", "15m", "1h"]
     strategy: StrategyUpdate
     risk: RiskUpdate
