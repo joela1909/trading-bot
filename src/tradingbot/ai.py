@@ -72,6 +72,30 @@ Regeln des Systems, die du nicht aendern kannst:
   reason: ein bis zwei Saetze auf Deutsch, hoechstens 300 Zeichen, mit Stop- und Ziel-Begruendung."""
 
 
+def _find_decision_json(text: str) -> dict:
+    """Das letzte JSON-Objekt mit "action" im Text (auch in ```json-Bloecken oder nach Ueberlegungen)."""
+    try:
+        data = json.loads(text)
+        if isinstance(data, dict):
+            return data
+    except ValueError:
+        pass
+    dec = json.JSONDecoder()
+    found = None
+    for i, ch in enumerate(text):
+        if ch != "{":
+            continue
+        try:
+            obj, _ = dec.raw_decode(text, i)
+        except ValueError:
+            continue
+        if isinstance(obj, dict) and "action" in obj:
+            found = obj
+    if found is None:
+        raise ValueError("kein JSON mit action")
+    return found
+
+
 @dataclass
 class AiDecision:
     action: str
@@ -236,8 +260,7 @@ class ClaudeAdvisor:
         try:
             if not isinstance(text, str):
                 raise ValueError
-            m = re.search(r"\{.*\}", text, re.S)  # kleine Modelle schreiben manchmal Text um das JSON
-            data = json.loads(m.group(0) if m else text)
+            data = _find_decision_json(text)  # Modelle schreiben manchmal Text oder Markdown um das JSON
             action = str(data["action"]).lower()
             confidence = float(data["confidence"])
             reason = str(data["reason"]).strip()
@@ -299,7 +322,7 @@ class OpenRouterClient:
         body = {
             "model": self.cfg.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": 2000,
+            "max_tokens": 4000,
         }
         if self.cfg.fallback_models:
             body["models"] = [self.cfg.model, *self.cfg.fallback_models]
