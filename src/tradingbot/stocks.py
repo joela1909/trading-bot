@@ -47,6 +47,8 @@ def stock_settings(settings: Settings) -> Settings:
         daytrading=st.daytrading.model_dump(),
         futures={**data["futures"], "leverage": st.leverage},
         stocks={**data["stocks"], "enabled": False},
+        scanner_top=0,  # Aktien haben ihren eigenen Scanner (stocks.scanner_top)
+        news_minutes=0,
     )
     return Settings(bot=BotConfig(**data), secrets=settings.secrets.model_copy(update={"trading_mode": "paper"}))
 
@@ -114,7 +116,12 @@ class StockRunner:
         if self.cfg.scanner_top > 0:
             bot.before_cycle = self._refresh_universe
         if self.cfg.news_block_minutes > 0:
-            bot.entry_guard = self._news_guard
+            if self.cfg.news_mode == "direction":
+                from .insights import NewsDirectionGuard
+
+                bot.entry_guard = NewsDirectionGuard(bot.feed.recent_news, self.cfg.news_block_minutes)
+            else:
+                bot.entry_guard = self._news_guard
         self.thread = threading.Thread(target=self._run, name="aktien", daemon=True)
         self.thread.start()
         log.info("Aktien-Bot gestartet: %s, %s", ", ".join(bot.cfg.symbols), bot.cfg.timeframe)
@@ -135,7 +142,7 @@ class StockRunner:
         self.scanned = scanned
         log.info("Aktien-Scanner %s: %s", day, ", ".join(scanned) or "nichts gefunden")
 
-    def _news_guard(self, symbol: str) -> tuple[bool, str]:
+    def _news_guard(self, symbol: str, side: str = "") -> tuple[bool, str]:
         news = self.bot.feed.recent_news(symbol, self.cfg.news_block_minutes)
         if news:
             return False, f"News in den letzten {self.cfg.news_block_minutes} min: {news[0][:80]}"

@@ -63,7 +63,7 @@ class TradingBot:
         self._chart_cache: dict = {}
         self._reset_request: bool | None = None
         self._fee_request = False
-        # Zusatzpruefung vor jedem Einstieg: (Paar) -> (erlaubt, Grund); z. B. News-Sperre bei Aktien
+        # Zusatzpruefung vor jedem Einstieg: (Paar, Richtung) -> (erlaubt, Grund); z. B. News-Richtung
         self.entry_guard = None
         self._track_cache: dict[str, tuple[int, list[float]]] = {}
         # wird zu Beginn jeder Runde aufgerufen, z. B. um die Aktienliste des Tages zu erneuern
@@ -804,16 +804,6 @@ class TradingBot:
             log.info("%s: kein Einstieg, %s", symbol, why)
             self._status[symbol] = f"Kein Einstieg: {why}"
             return
-        if self.entry_guard is not None:
-            try:
-                allowed, why = self.entry_guard(symbol)
-            except Exception as exc:  # noqa: BLE001
-                log.debug("%s: Zusatzpruefung fehlgeschlagen (%s), Einstieg erlaubt", symbol, exc)
-                allowed = True
-            if not allowed:
-                log.info("%s: kein Einstieg, %s", symbol, why)
-                self._status[symbol] = f"Kein Einstieg: {why}"
-                return
         if not self.risk.can_open_new(len(self.state.positions)):
             log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
             self._status[symbol] = "Kein Einstieg: maximale Zahl offener Positionen erreicht"
@@ -834,6 +824,16 @@ class TradingBot:
         paper = self.cfg.paper
         idx = len(df) - 1
         trigger = self.strategy.trigger_at(df, idx, side)
+        if self.entry_guard is not None:
+            try:
+                allowed, why = self.entry_guard(symbol, side)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: Zusatzpruefung fehlgeschlagen (%s), Einstieg erlaubt", symbol, exc)
+                allowed = True
+            if not allowed:
+                log.info("%s: %s-Signal verworfen, %s", symbol, side, why)
+                self._status[symbol] = f"{side.capitalize()}-Signal verworfen: {why}"
+                return
         ok, why = self._track_record(symbol, df)
         if not ok:
             log.info("%s: %s-Signal verworfen, %s", symbol, side, why)

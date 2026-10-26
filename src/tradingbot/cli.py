@@ -90,6 +90,19 @@ def build_bot(settings: Settings) -> TradingBot:
         # Signale und Chart aus Spot-Kursen (wie der TradingView-Chart auf dem Spot-Paar), gehandelt auf cfg.market
         bot.signal_feed = CcxtDataFeed(cfg.exchange, market_type="spot")
     bot.chart_feed = CcxtDataFeed(cfg.exchange, market_type="spot" if spot_signals else cfg.market)  # eigener Zugang fuer den Chart
+    if cfg.scanner_top > 0 and cfg.is_futures:
+        from .insights import CryptoScanner
+
+        bot.before_cycle = CryptoScanner(bot, feed.exchange, bot.signal_feed.exchange if spot_signals else None, cfg.scanner_top)
+    if cfg.news_minutes > 0:
+        if sec.alpaca_api_key and sec.alpaca_api_secret:
+            from .alpaca import AlpacaDataFeed
+            from .insights import NewsDirectionGuard, alpaca_crypto_symbol
+
+            news = AlpacaDataFeed(sec.alpaca_api_key, sec.alpaca_api_secret)
+            bot.entry_guard = NewsDirectionGuard(lambda s, m: news.recent_news(alpaca_crypto_symbol(s), m), cfg.news_minutes)
+        else:
+            log.warning("News-Richtung aus: ALPACA_API_KEY/ALPACA_API_SECRET fehlen")
     return bot
 
 

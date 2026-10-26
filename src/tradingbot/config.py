@@ -192,8 +192,10 @@ class StocksConfig(BaseModel):
     daytrading: "DaytradingConfig" = Field(default_factory=_us_session)
     # Scanner: taeglich die meistgehandelten Aktien zu `symbols` dazunehmen (0 = aus), wie trader-scanner
     scanner_top: int = Field(default=0, ge=0, le=30)
-    # News-Sperre: kein Einstieg, wenn es in den letzten so vielen Minuten Schlagzeilen gab (0 = aus), wie trader-news
+    # News der letzten so vielen Minuten auswerten (0 = aus), wie trader-news. direction: nur in die Richtung handeln,
+    # fuer die die Schlagzeilen sprechen; block: bei News gar nicht einsteigen
     news_block_minutes: int = Field(default=0, ge=0, le=1440)
+    news_mode: Literal["direction", "block"] = "direction"
 
     @field_validator("symbols")
     @classmethod
@@ -232,6 +234,11 @@ class BotConfig(BaseModel):
     quote_currency: str = "USDT"
     timeframe: str = "1h"
     poll_interval_seconds: int = 60
+    # Krypto-Scanner: alle 6 Stunden die meistgehandelten USDT-Perpetuals dazunehmen (0 = aus), wie trader-scanner
+    scanner_top: int = Field(default=0, ge=0, le=30)
+    # News-Richtung (Alpaca News, braucht ALPACA-Schluessel): nur in die Richtung der Schlagzeilen der letzten
+    # so vielen Minuten handeln (0 = aus)
+    news_minutes: int = Field(default=0, ge=0, le=1440)
     keep_awake: bool = True  # Windows: Ruhemodus verhindern, solange der Bot laeuft
     state_dir: str = "state"
     log_dir: str = "logs"

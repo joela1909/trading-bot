@@ -112,6 +112,6 @@ def test_entry_guard_blocks_entry(settings, tmp_path):
     buy_i = _first_buy_index(build_strategy(settings.bot.strategy), full)
     feed = FakeFeed(full.iloc[: buy_i + 1].reset_index(drop=True))
     bot, _, _ = _make_bot(settings, feed, tmp_path)
-    bot.entry_guard = lambda s: (False, "News in den letzten 30 min: x")
+    bot.entry_guard = lambda s, side: (False, "News sprechen fuer Short (-2): x")
     bot.run_once()
-    assert not bot.state.positions and "News" in bot._status["BTC/USDT"]
+    assert not bot.state.positions and "News sprechen" in bot._status["BTC/USDT"]

@@ -23,6 +23,8 @@ timeframe: 1m
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
 poll_interval_seconds: 5      # so oft prueft der Bot Kurse, Stops und Ziele (Kerzen werden zwischengespeichert)
+scanner_top: 5               # Krypto-Scanner: alle 6 Stunden die 5 meistgehandelten USDT-Perpetuals (24h-Umsatz) dazunehmen, 0 = aus
+news_minutes: 60              # News-Richtung: nur in die Richtung handeln, fuer die die Schlagzeilen der letzten 60 Minuten sprechen (Alpaca News), 0 = aus
 
 # Windows: Ruhemodus verhindern, solange der Bot laeuft (aendert keine Einstellung, endet mit dem Bot)
 keep_awake: true
@@ -146,7 +148,8 @@ stocks:
   slippage_pct: 0.02
   allow_short: true
   scanner_top: 10            # taeglich ab 9:35 New York die 10 meistgehandelten Aktien (ab 5 USD) dazunehmen, 0 = aus
-  news_block_minutes: 30     # kein Einstieg, wenn es zur Aktie in den letzten 30 Minuten News gab (Alpaca/Benzinga), 0 = aus
+  news_block_minutes: 30     # News der letzten 30 Minuten auswerten (Alpaca/Benzinga), 0 = aus
+  news_mode: direction       # direction: nur in die Richtung handeln, fuer die die Schlagzeilen sprechen; block: bei News nicht einsteigen
   strategy:                  # Abweichungen von strategy oben
     orb_sessions: ["09:30 America/New_York"]
     orb_weekdays: true
