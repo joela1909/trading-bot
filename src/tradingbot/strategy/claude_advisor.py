@@ -20,9 +20,12 @@ class ClaudeAdvisorStrategy(Strategy):
     live_only = True
     chart_lines = [("ema_fast", "EMA schnell", "main"), ("ema_slow", "EMA langsam", "trend")]
 
+    MIN_STOP_PCT, MAX_STOP_PCT = 0.15, 10.0  # Stop der KI nur in diesem Abstand vom Kurs, sonst gilt der eigene Plan
+
     def __init__(self, cfg: StrategyConfig, ai: AiConfig, api_key: str = "", client=None):
         super().__init__(cfg)
         self.ai = ai
+        self._levels: tuple[str, float | None, float | None] | None = None  # (Richtung, Stop, Ziel) der letzten KI-Antwort
         self.advisor = ClaudeAdvisor(ai, api_key=api_key, client=client, futures=cfg.allow_short)
 
     @property
@@ -48,6 +51,7 @@ class ClaudeAdvisorStrategy(Strategy):
         position = context.get("position")
         prompt = build_user_prompt(symbol, context.get("timeframe", "?"), context.get("quote", ""), df, context, self.ai.candles_in_prompt)
         d: AiDecision = self.advisor.ask(prompt)
+        self._levels = None
 
         if not d.ok:
             self.advisor.record(symbol, d, applied=False, note="Fehler, es wird gehalten")
@@ -60,7 +64,9 @@ class ClaudeAdvisorStrategy(Strategy):
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence:.2f}")
                 return Decision(Signal.HOLD, f"KI-Short verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)
             self.advisor.record(symbol, d, applied=True)
-            return Decision(Signal.SHORT, f"KI: {d.reason}", atr=atr_value)
+            self._levels = ("short", d.stop_loss, d.take_profit)
+            stop, tp = self.entry_plan(df, len(df) - 1, "short", close, atr_value)
+            return Decision(Signal.SHORT, f"KI: {d.reason}", stop_loss=stop, take_profit=tp, atr=atr_value)
         if d.action == "cover" and side == "short":
             if d.confidence < self.ai.min_confidence_exit:
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence_exit:.2f}")
@@ -72,9 +78,8 @@ class ClaudeAdvisorStrategy(Strategy):
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence:.2f}")
                 return Decision(Signal.HOLD, f"KI-Kauf verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)
             self.advisor.record(symbol, d, applied=True)
-            stop = close - self.stop_distance(close, atr_value)
-            target = self.target_distance(close, atr_value)
-            tp = close + target if target is not None else None
+            self._levels = ("long", d.stop_loss, d.take_profit)
+            stop, tp = self.entry_plan(df, len(df) - 1, "long", close, atr_value)
             return Decision(Signal.BUY, f"KI: {d.reason}", stop_loss=stop, take_profit=tp, atr=atr_value)
         if d.action == "sell" and position is not None and side != "short":
             if d.confidence < self.ai.min_confidence_exit:
@@ -84,7 +89,22 @@ class ClaudeAdvisorStrategy(Strategy):
             return Decision(Signal.SELL, f"KI: {d.reason}", atr=atr_value)
         applied = d.action == "hold"
         self.advisor.record(symbol, d, applied=applied, note="" if applied else "passt nicht zur Position")
+        if applied and position is not None and (d.stop_loss or d.take_profit):
+            # offene Position: neue Werte der KI, der Bot prueft sie (Stop nur enger)
+            return Decision(Signal.HOLD, f"KI: {d.reason}", stop_loss=d.stop_loss, take_profit=d.take_profit, atr=atr_value, adjust=True)
         return Decision(Signal.HOLD, f"KI: {d.reason}", atr=atr_value)
+
+    def entry_plan(self, df, i, side, entry, atr_value):
+        """Stop und Ziel der KI, wenn sie zur Richtung passen und vernuenftig weit weg sind; sonst der eigene Plan."""
+        lv = self._levels
+        if lv is not None and lv[0] == side and lv[1]:
+            sign = -1 if side == "short" else 1
+            stop, tp = lv[1], lv[2]
+            dist = sign * (entry - stop) / entry * 100.0
+            tp_ok = tp is None or sign * (tp - entry) > 0
+            if self.MIN_STOP_PCT <= dist <= self.MAX_STOP_PCT and tp_ok:
+                return stop, tp
+        return super().entry_plan(df, i, side, entry, atr_value)
 
     def export_state(self) -> dict:
         return {"ai": self.advisor.export_state()}

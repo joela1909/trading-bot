@@ -28,6 +28,7 @@ class Decision:
     stop_loss: float | None = None
     take_profit: float | None = None
     atr: float | None = None
+    adjust: bool = False  # HOLD mit neuem Stop/Ziel fuer die offene Position (z. B. von der KI)
 
 
 @dataclass

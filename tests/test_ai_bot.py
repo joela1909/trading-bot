@@ -60,3 +60,43 @@ def test_ai_bot_has_own_account_and_settings(settings, tmp_path):
     runner.cfg = runner.cfg.model_copy(update={"enabled": True, "provider": "openrouter"})
     runner.start()
     assert runner.problem == "OPENROUTER_API_KEY fehlt" and runner.snapshot()["ready"] is False
+
+
+def test_ai_sets_stop_and_target_and_adjusts_open_position(settings, tmp_path):
+    from tradingbot.models import Decision, Position
+    from tests.test_bot import _make_bot
+
+    s = ClaudeAdvisorStrategy(StrategyConfig(name="claude_advisor", allow_short=True, stop_atr_mult=2.0, take_profit_atr_mult=4.0),
+                              AiConfig(), client=object())
+    df = s.prepare(make_ohlcv(trend_closes()))
+    close = float(df["close"].iloc[-1])
+    s.advisor.ask = lambda p: AiDecision("buy", 0.8, "Sweep", stop_loss=close * 0.99, take_profit=close * 1.03)
+    d = s.decide(df, context={"symbol": "BTC", "position": None})
+    assert d.signal == Signal.BUY and abs(d.stop_loss - close * 0.99) < 1e-9 and abs(d.take_profit - close * 1.03) < 1e-9
+    assert s.entry_plan(df, len(df) - 1, "long", close, 1.0) == (d.stop_loss, d.take_profit)
+    s.advisor.ask = lambda p: AiDecision("buy", 0.8, "x", stop_loss=close * 1.01, take_profit=close * 1.03)
+    assert s.decide(df, context={"symbol": "BTC", "position": None}).stop_loss < close, "Stop falsch: eigener Plan"
+
+    bot, _, _ = _make_bot(settings, FakeFeed(make_ohlcv(trend_closes())), tmp_path)
+    pos = Position("BTC/USDT", 1.0, 100.0, 95.0, 110.0, "2026-10-26T00:00:00+00:00", 100.0, 0.0, 1.0)
+    bot._adjust_levels("BTC/USDT", pos, 102.0, Decision(Signal.HOLD, "x", stop_loss=90.0, take_profit=115.0, adjust=True))
+    assert pos.stop_loss == 95.0 and pos.take_profit == 115.0, "Stop nie weiter weg"
+    bot._adjust_levels("BTC/USDT", pos, 102.0, Decision(Signal.HOLD, "x", stop_loss=99.0, take_profit=None, adjust=True))
+    assert pos.stop_loss == 99.0 and pos.stop_kind == "strategy"
+
+
+def test_liquidity_zones_orderbook_and_positioning():
+    from tradingbot.insights import LiquidityContext, liquidity_zones, orderbook_liquidity
+
+    df = make_ohlcv(trend_closes())
+    price = float(df["close"].iloc[-1])
+    assert liquidity_zones(df, price)
+    ex = SimpleNamespace(
+        fetch_order_book=lambda s, limit: {"bids": [[price * 0.998, 10.0], [price * 0.99, 50.0]], "asks": [[price * 1.002, 2.0], [price * 1.02, 1.0]]},
+        fetch_funding_rate=lambda s: {"fundingRate": 0.0001},
+        fetch_open_interest_history=lambda s, tf, limit: [{"openInterestValue": 1e9}, {"openInterestValue": 1.1e9}],
+    )
+    ob, mid = orderbook_liquidity(ex, "BTC/USDT:USDT", price)
+    assert abs(mid - price) / price < 0.01 and "mehr Kaeufer" in ob[0] and any("Kauf-Waende" in x for x in ob)
+    ctx = LiquidityContext(ex)("BTC/USDT:USDT", df)
+    assert any("Funding" in x for x in ctx) and any("Open Interest" in x and "+10.00 %" in x for x in ctx)

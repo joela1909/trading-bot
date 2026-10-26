@@ -76,6 +76,10 @@ def build_ai_bot(settings: Settings, feed=None, client=None) -> TradingBot:
     if cfg.strategy.signal_source == "spot":
         bot.signal_feed = CcxtDataFeed(cfg.exchange, market_type="spot")
     bot.chart_feed = CcxtDataFeed(cfg.exchange, market_type="spot" if bot.signal_feed is not None else "futures")
+    if getattr(feed, "exchange", None) is not None:
+        from .insights import LiquidityContext
+
+        bot.context_extra = LiquidityContext(feed.exchange)  # Orderbuch, Funding, OI, Liquiditaetszonen fuer die KI
     return bot
 
 

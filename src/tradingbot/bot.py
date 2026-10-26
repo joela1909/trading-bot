@@ -66,6 +66,8 @@ class TradingBot:
         # Zusatzpruefung vor jedem Einstieg: (Paar, Richtung) -> (erlaubt, Grund); z. B. News-Richtung
         self.entry_guard = None
         self._track_cache: dict[str, tuple[int, list[float]]] = {}
+        # Zusatzwissen fuer die Strategie je Paar, z. B. Liquiditaet fuer die KI: (Paar, Kerzen) -> Liste von Saetzen
+        self.context_extra = None
         # wird zu Beginn jeder Runde aufgerufen, z. B. um die Aktienliste des Tages zu erneuern
         self.before_cycle = None
         # Echtzeit: (Kerze, Richtung) des letzten Ausstiegs je Paar, "any" nach einem Einstieg
@@ -137,7 +139,17 @@ class TradingBot:
             "quote": self.cfg.quote_currency,
             "timeframe": self.cfg.timeframe,
             "open_positions": len(self.state.positions),
+            "liquidity": self._extra(symbol),
         }
+
+    def _extra(self, symbol: str) -> list[str]:
+        if self.context_extra is None:
+            return []
+        try:
+            return self.context_extra(symbol, self._candles.get(symbol))
+        except Exception as exc:  # noqa: BLE001
+            log.debug("%s: Zusatzwissen nicht abrufbar (%s)", symbol, exc)
+            return []
 
     def build_snapshot(self) -> dict:
         self._snapshot = make_snapshot(
@@ -779,6 +791,23 @@ class TradingBot:
             exit_signal = Signal.COVER if pos.is_short else Signal.SELL
             if decision.signal == exit_signal:
                 self._close_position(symbol, pos, f"signal: {decision.reason}")
+            elif decision.adjust:
+                self._adjust_levels(symbol, pos, price, decision)
+
+    def _adjust_levels(self, symbol: str, pos: Position, price: float, decision) -> None:
+        """Neuer Stop/neues Ziel von der Strategie (z. B. KI): Stop nur naeher an den Kurs, beides auf der richtigen Seite."""
+        sign = -1 if pos.is_short else 1
+        new_stop = decision.stop_loss
+        if new_stop and sign * (price - new_stop) > 0 and sign * (new_stop - pos.stop_loss) > 0:
+            log.info("%s: Stop von der Strategie %.4f -> %.4f", symbol, pos.stop_loss, new_stop)
+            pos.set_stop(new_stop, "strategy")
+            if not pos.is_short:
+                self._raise_exchange_stop(symbol, pos)
+        new_tp = decision.take_profit
+        if new_tp and sign * (new_tp - price) > 0 and new_tp != pos.take_profit:
+            log.info("%s: Ziel von der Strategie %s -> %.4f", symbol, pos.take_profit, new_tp)
+            pos.take_profit = new_tp
+        self._save()
 
     def _maybe_enter(self, symbol: str, price: float, df, block_side: str | None = None) -> None:
         if self.state.entries_paused:

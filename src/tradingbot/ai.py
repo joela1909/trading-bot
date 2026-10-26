@@ -26,8 +26,10 @@ DECISION_SCHEMA = {
         "action": {"type": "string", "enum": list(ACTIONS)},
         "confidence": {"type": "number"},
         "reason": {"type": "string"},
+        "stop_loss": {"type": ["number", "null"]},
+        "take_profit": {"type": ["number", "null"]},
     },
-    "required": ["action", "confidence", "reason"],
+    "required": ["action", "confidence", "reason", "stop_loss", "take_profit"],
     "additionalProperties": False,
 }
 
@@ -51,13 +53,23 @@ Pro neuer abgeschlossener Kerze bekommst du die Marktdaten eines Handelspaars un
 Regeln des Systems, die du nicht aendern kannst:
 - Moegliche Aktionen: buy (Long eroeffnen), short (Short eroeffnen), sell (Long schliessen), cover (Short schliessen), hold.
 - buy und short nur ohne offene Position. sell nur bei offenem Long, cover nur bei offenem Short. Sonst hold.
-- Positionsgroesse, Hebel, Stop-Loss und Take-Profit berechnet der Bot selbst. Du entscheidest nur Richtung und Zeitpunkt.
+- Du legst Stop-Loss und Take-Profit als absolute Kurse fest. Positionsgroesse und Hebel berechnet der Bot aus deinem Stop.
+- Beim Einstieg (buy/short) sind stop_loss und take_profit Pflicht. Long: Stop unter dem Kurs, Ziel darueber; Short umgekehrt.
+- Lege den Stop hinter die naechste Liquiditaetszone bzw. Struktur (Swing-Tief/-Hoch, grosse Orderbuch-Wand), nicht mitten hinein,
+  damit ein kurzer Stop-Hunt dich nicht ausstoppt. Lege das Ziel kurz vor die naechste gegenueberliegende Liquiditaet.
+- Gewinn zu Risiko mindestens 1,5. Stop mindestens 0,3 % und hoechstens 5 % vom Kurs entfernt.
+- Bei offener Position darfst du mit action hold neue Werte setzen: den Stop nur naeher an den Kurs (nie weiter weg), das Ziel frei.
+  Willst du nichts aendern, setze beide auf null.
 - Jeder Handel kostet Gebuehren und Kursabweichung, zusammen etwa 0,2 Prozent. Steige nur bei einer klaren Lage ein. Halten ist der Normalfall.
 - Handle bevorzugt mit dem Trend (z. B. Kurs ueber beiden EMAs und EMAs steigend: eher Long; darunter und fallend: eher Short). In Seitwaertsphasen: hold.
 - Ein offener Trade hat einen Stop-Loss im Bot. Schliesse aktiv nur, wenn die Lage sich erkennbar gegen die Position gedreht hat.
 - confidence ist deine ehrliche Wahrscheinlichkeit zwischen 0 und 1, dass die Entscheidung sich lohnt. Der Bot ignoriert Entscheidungen unter seiner Schwelle.
 - Nutze ausschliesslich die gelieferten Zahlen. Du kennst keine Nachrichten und keine Zukunft.
-- Antworte nur mit einem JSON-Objekt: {"action": "...", "confidence": 0.0, "reason": "..."}. reason: ein bis zwei Saetze auf Deutsch, hoechstens 300 Zeichen."""
+- Liquiditaet: Stops sammeln sich ueber Swing-Hochs und unter Swing-Tiefs sowie an gleichen Hochs/Tiefs. Der Kurs holt sie oft
+  ab (Sweep) und dreht dann. Ein Sweep mit Umkehr ist ein Einstiegsgrund in Gegenrichtung, ein Ausbruch mit Volumen in Ausbruchsrichtung.
+  Orderbuch-Ungleichgewicht, Funding und Open Interest zeigen Druck und Positionierung (hohes positives Funding = viele Longs).
+- Antworte nur mit einem JSON-Objekt: {"action": "...", "confidence": 0.0, "reason": "...", "stop_loss": Zahl oder null, "take_profit": Zahl oder null}.
+  reason: ein bis zwei Saetze auf Deutsch, hoechstens 300 Zeichen, mit Stop- und Ziel-Begruendung."""
 
 
 @dataclass
@@ -66,6 +78,8 @@ class AiDecision:
     confidence: float
     reason: str
     ok: bool = True
+    stop_loss: float | None = None
+    take_profit: float | None = None
 
 
 def _fmt(x: float) -> str:
@@ -117,13 +131,15 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
     if context.get("free_quote") is not None:
         account.append(f"frei {context['free_quote']:.2f} {quote}")
     account.append(f"offene Positionen insgesamt {context.get('open_positions', 0)}")
+    liq = context.get("liquidity") or []
 
     return (
         f"Handelspaar: {symbol}, Zeitrahmen {timeframe}\n"
         f"Position: {position_text}\n"
         f"Konto: {', '.join(account)}\n\n"
         "Kennzahlen:\n" + "\n".join(f"- {s}" for s in stats) + "\n\n"
-        f"Letzte {len(rows)} Kerzen (UTC, open,high,low,close,volume), die letzte ist die neueste:\n" + "\n".join(rows) + "\n\n"
+        + ("Liquiditaet:\n" + "\n".join(f"- {s}" for s in liq) + "\n\n" if liq else "")
+        + f"Letzte {len(rows)} Kerzen (UTC, open,high,low,close,volume), die letzte ist die neueste:\n" + "\n".join(rows) + "\n\n"
         "Entscheide jetzt."
     )
 
@@ -229,7 +245,15 @@ class ClaudeAdvisor:
             return AiDecision("hold", 0.0, "KI-Antwort nicht lesbar", ok=False)
         if action not in ACTIONS or confidence != confidence:
             return AiDecision("hold", 0.0, "KI-Antwort ungueltig", ok=False)
-        return AiDecision(action, min(max(confidence, 0.0), 1.0), reason[:300])
+
+        def num(key):
+            try:
+                v = float(data.get(key)) if data.get(key) is not None else None
+            except (TypeError, ValueError):
+                return None
+            return v if v is not None and v == v and v > 0 else None
+
+        return AiDecision(action, min(max(confidence, 0.0), 1.0), reason[:300], stop_loss=num("stop_loss"), take_profit=num("take_profit"))
 
 
 class WorkersAiClient:
