@@ -155,6 +155,11 @@ class ExecutionConfig(BaseModel):
 
 
 class AiConfig(BaseModel):
+    # anthropic: Claude ueber die Anthropic-API (ANTHROPIC_API_KEY, kostet je Abfrage)
+    # workers_ai: Modell von Cloudflare Workers AI ueber den Worker (10.000 Neurons am Tag kostenlos)
+    # openrouter: Modelle ueber openrouter.ai (OPENROUTER_API_KEY), z. B. freie Modelle mit Endung :free
+    provider: Literal["anthropic", "workers_ai", "openrouter"] = "anthropic"
+    fallback_models: list[str] = Field(default_factory=list)  # openrouter: Ausweichmodelle, wenn das erste nicht antwortet
     model: str = "claude-opus-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -163,6 +168,26 @@ class AiConfig(BaseModel):
     candles_in_prompt: int = Field(default=48, ge=10, le=300)
     timeout_seconds: float = Field(default=90.0, ge=5.0)
     max_tokens: int = Field(default=16000, ge=2000)
+
+
+class AiBotConfig(BaseModel):
+    """KI-Konto: ein zweiter Krypto-Papier-Bot, bei dem ein Sprachmodell ueber Ein- und Ausstieg entscheidet.
+    Laeuft neben dem normalen Krypto-Bot mit eigenem Konto. Grundlage ist die Krypto-Konfiguration oben."""
+
+    enabled: bool = False
+    provider: Literal["anthropic", "workers_ai", "openrouter"] = "workers_ai"
+    model: str = "@cf/google/gemma-4-26b-a4b-it"
+    fallback_models: list[str] = Field(default_factory=list)
+    symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
+    timeframe: str = "15m"
+    starting_balance: float = Field(default=1000.0, gt=0)
+    leverage: float = Field(default=5.0, ge=1.0, le=100.0)
+    allow_short: bool = True
+    max_calls_per_day: int = Field(default=300, ge=1)
+    min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
+    candles_in_prompt: int = Field(default=30, ge=10, le=300)
+    strategy: dict = Field(default_factory=lambda: {"stop_atr_mult": 2.0, "take_profit_atr_mult": 4.0, "min_stop_pct": 0.5})
+    risk: dict = Field(default_factory=dict)
 
 
 def _us_session() -> "DaytradingConfig":
@@ -253,6 +278,7 @@ class BotConfig(BaseModel):
     daytrading: DaytradingConfig = Field(default_factory=DaytradingConfig)
     futures: FuturesConfig = Field(default_factory=FuturesConfig)
     stocks: StocksConfig = Field(default_factory=StocksConfig)
+    ai_bot: AiBotConfig = Field(default_factory=AiBotConfig)
 
     @property
     def is_futures(self) -> bool:
@@ -272,8 +298,6 @@ class BotConfig(BaseModel):
     def _market_rules(self):
         if self.strategy.allow_short and self.market == "spot":
             raise ValueError("Short-Positionen (strategy.allow_short) gehen nur mit market: futures, nicht im Spot-Handel")
-        if self.strategy.allow_short and self.strategy.name == "claude_advisor":
-            raise ValueError("Die KI-Strategie claude_advisor kann noch keine Short-Positionen. Setze allow_short: false.")
         if self.is_futures:
             # ccxt-Schreibweise fuer USDT-Perpetuals: BTC/USDT -> BTC/USDT:USDT
             self.symbols = [s if ":" in s else f"{s}:{s.split('/')[1]}" for s in self.symbols]
@@ -305,6 +329,7 @@ class Secrets(BaseSettings):
     telegram_chat_id: str = ""
     dashboard_hosts: str = ""  # komma-getrennt, ergaenzt dashboard.allowed_hosts
     alpaca_api_key: str = ""  # Aktien: Schluessel eines Alpaca-Papierkontos (nur Kurse, keine Orders)
+    openrouter_api_key: str = ""  # KI-Konto ueber OpenRouter (freie Modelle: 50 Abfragen/Tag, nach 10 $ Aufladung 1.000/Tag)
     alpaca_api_secret: str = ""
 
     @property

@@ -23,8 +23,8 @@
   var tradeView = 'list';
   // Kategorie: crypto | stocks. Jede Seite zeigt nur sie, gemerkt im Browser.
   var market = 'crypto';
-  try { if (localStorage.getItem('tb-market') === 'stocks') market = 'stocks'; } catch (e) { /* ohne Speicher */ }
-  var snaps = { crypto: null, stocks: null };
+  try { var savedMarket = localStorage.getItem('tb-market'); if (savedMarket === 'stocks' || savedMarket === 'ai') market = savedMarket; } catch (e) { /* ohne Speicher */ }
+  var snaps = { crypto: null, stocks: null, ai: null };
   var tradeFilter = null;
   var settingsLoaded = false;
   var restarting = false;
@@ -128,7 +128,7 @@
     var name = parts[0] || 'uebersicht';
     if (!document.querySelector('[data-page="' + name + '"]')) name = 'uebersicht';
     var params = new URLSearchParams(parts[1] || '');
-    if (params.get('m') && params.get('m') !== market) setMarket(params.get('m') === 'stocks' ? 'stocks' : 'crypto', true);
+    if (params.get('m') && params.get('m') !== market) setMarket({ stocks: 'stocks', ai: 'ai' }[params.get('m')] || 'crypto', true);
     if (params.get('s')) chartSymbol = params.get('s');
     var wasChart = page === 'chart';
     page = name;
@@ -144,7 +144,7 @@
   }
 
   // Aktien noch nicht bereit: statt der Seiten die Einrichtung zeigen (Einstellungen gehen trotzdem)
-  function stocksPending() { return market === 'stocks' && !(snap && snap.ready); }
+  function stocksPending() { return market !== 'crypto' && !(snap && snap.ready); }
 
   function showPages() {
     var pending = stocksPending() && page !== 'einstellungen';
@@ -156,7 +156,8 @@
   // Pfade der API je Kategorie
   var API = {
     crypto: { snapshot: '/api/snapshot', chart: '/api/chart', settings: '/api/settings', post: '/api/' },
-    stocks: { snapshot: '/api/stocks', chart: '/api/stocks-chart', settings: '/api/stocks-settings', post: '/api/stocks-' }
+    stocks: { snapshot: '/api/stocks', chart: '/api/stocks-chart', settings: '/api/stocks-settings', post: '/api/stocks-' },
+    ai: { snapshot: '/api/ai', chart: '/api/ai-chart', settings: '/api/ai-settings', post: '/api/ai-' }
   };
 
   function setMarket(m, quiet) {
@@ -186,6 +187,10 @@
 
   function renderSetup() {
     var s = snap;
+    if (market === 'ai') {
+      $('stocks-problem').textContent = !s ? 'Lade …' : !s.enabled ? 'Das KI-Konto ist in config.yaml ausgeschaltet (ai_bot.enabled).' : (s.problem || 'Das KI-Konto startet gerade …');
+      return;
+    }
     $('stocks-problem').textContent = !s ? 'Lade …' : !s.enabled ? 'Aktienhandel ist in config.yaml ausgeschaltet (stocks.enabled).'
       : s.problem === 'Alpaca-Schluessel fehlen' ? 'Noch nicht eingerichtet: Es fehlen die Alpaca-Schlüssel.' : (s.problem || 'Der Aktien-Bot startet gerade …');
   }
@@ -193,7 +198,7 @@
   // ------------------------------------------------------------ Kopf
   function renderHeader() {
     var s = snap;
-    if (!s || (market === 'stocks' && !s.ready)) {
+    if (!s || (market !== 'crypto' && !s.ready)) {
       $('mode').textContent = 'Papier'; $('mode').className = 'badge paper';
       $('run').className = 'dot'; $('run-text').textContent = s ? 'nicht aktiv' : 'lade …';
       $('banner').hidden = !restarting;
@@ -220,13 +225,14 @@
   // ------------------------------------------------------------ Übersicht
   function renderOverview() {
     var s = snap, q = s.quote, st = s.stats;
-    $('hero-label').textContent = market === 'stocks' ? 'Aktienkonto' : 'Kapital';
+    $('hero-label').textContent = market === 'stocks' ? 'Aktienkonto' : market === 'ai' ? 'KI-Konto' : 'Kapital';
     var hero = clear($('hero-equity'));
     hero.appendChild(document.createTextNode(nf(s.equity, 2)));
     hero.appendChild(el('small', '', q));
     var hs = clear($('hero-stats'));
     var stat = function (label, value, cls) { var sp = el('span', '', label + ' '); sp.appendChild(el('b', cls || '', value)); hs.appendChild(sp); };
     if (market === 'stocks') stat('Börse', s.market_open ? 'offen' : 'zu', s.market_open ? 'pos' : '');
+    if (market === 'ai') stat('KI-Abfragen heute', String(s.ai_calls_today || 0), '');
     stat('Heute', signed(s.day_pnl_pct, 2, ' %'), tone(s.day_pnl_pct));
     stat('Gesamt', signed(s.return_pct, 2, ' %'), tone(s.return_pct));
     stat('Frei', nf(s.free_quote, 2));
@@ -1028,6 +1034,12 @@
       .forEach(function (x, i) { if (i) lk.appendChild(document.createTextNode(' · ')); lk.appendChild(document.createTextNode(x[0])); lk.appendChild(el('b', '', x[1])); });
     $('s-reset').hidden = !d.has_override;
     showFormError(null);
+    // KI-Konto: Einstellungen stehen in config.yaml (ai_bot), in der App nur Konto zuruecksetzen
+    var ai = market === 'ai';
+    document.querySelectorAll('#settings fieldset').forEach(function (f) { f.hidden = ai && !f.contains($('s-account-reset')); });
+    $('s-save').hidden = ai;
+    if (ai) $('s-reset').hidden = true;
+    if (ai) $('s-locked').textContent = 'KI-Konto: ' + (snap && snap.model ? snap.model : 'Sprachmodell') + '. Paare, Zeitrahmen, Hebel und Modell stehen in config.yaml unter ai_bot.';
   }
 
   function levHint() {
@@ -1256,7 +1268,7 @@
   });
   $('s-account-reset').addEventListener('click', function () {
     var clear = $('s-reset-trades').checked;
-    var what = market === 'stocks' ? 'Aktienkonto' : 'Krypto-Konto';
+    var what = market === 'stocks' ? 'Aktienkonto' : market === 'ai' ? 'KI-Konto' : 'Krypto-Konto';
     var open = snap && snap.positions ? snap.positions.length : 0;
     if (!window.confirm(what + ' auf Werkszustand zurücksetzen?\n\nKapital zurück aufs Startkapital, Kapitalverlauf, Tageslimit und Sperren zurück'
       + (clear ? ', Trade-Verlauf und Statistik gelöscht' : ', Trade-Verlauf bleibt') + '.'

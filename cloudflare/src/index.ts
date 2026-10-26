@@ -24,9 +24,14 @@ interface Env {
   // Aktien: Schluessel eines kostenlosen Alpaca-Papierkontos (nur fuer Kurse). npx wrangler secret put ALPACA_API_KEY
   ALPACA_API_KEY?: string;
   ALPACA_API_SECRET?: string;
+  // KI-Konto: Sprachmodelle von Workers AI (10.000 Neurons am Tag kostenlos) oder OpenRouter (Schluessel als Secret)
+  AI: Ai;
+  OPENROUTER_API_KEY?: string;
 }
 
 const STATE_HOST = "state.tradingbot";
+const AI_HOST = "ai.tradingbot";
+const AI_MODEL = /^@cf\/[A-Za-z0-9_.\/-]{3,120}$/;
 const BOT_PORT = 8765;
 const SAFE_NAME = /^[A-Za-z0-9_.-]{1,128}$/;
 const MAX_STATE_BYTES = 20 * 1024 * 1024;
@@ -49,6 +54,28 @@ async function handleState(request: Request, env: Env): Promise<Response> {
   return new Response("nicht erlaubt", { status: 405 });
 }
 
+/** Leitet eine KI-Anfrage des Bots an Workers AI weiter. Nur aus dem Container erreichbar. */
+async function handleAi(request: Request, env: Env): Promise<Response> {
+  if (request.method !== "POST") return new Response("nicht erlaubt", { status: 405 });
+  let body: { model?: string; messages?: unknown; max_tokens?: number; response_format?: unknown };
+  try {
+    body = await request.json();
+  } catch {
+    return new Response("ungueltiges JSON", { status: 400 });
+  }
+  if (!body.model || !AI_MODEL.test(body.model) || !Array.isArray(body.messages)) {
+    return new Response("model oder messages fehlen", { status: 400 });
+  }
+  try {
+    const input: Record<string, unknown> = { messages: body.messages, max_tokens: Math.min(body.max_tokens ?? 600, 2000) };
+    if (body.response_format) input.response_format = body.response_format;
+    const result = await env.AI.run(body.model as keyof AiModels, input as never);
+    return Response.json({ result });
+  } catch (err) {
+    return new Response(`Workers AI: ${String(err).slice(0, 300)}`, { status: 502 });
+  }
+}
+
 export class TradingBot extends Container<Env> {
   defaultPort = BOT_PORT;
   // Der Cron-Trigger meldet sich jede Minute, deshalb schlaeft der Bot nie ein, solange der Worker laeuft.
@@ -58,6 +85,7 @@ export class TradingBot extends Container<Env> {
     TRADINGBOT_CONTAINER: "1",
     DASHBOARD_BIND: "0.0.0.0",
     TRADINGBOT_STATE_URL: `http://${STATE_HOST}/`,
+    TRADINGBOT_AI_URL: `http://${AI_HOST}/`,
     TRADING_MODE: "paper",
     TZ: "Europe/Berlin",
   };
@@ -69,6 +97,7 @@ export class TradingBot extends Container<Env> {
       ...this.envVars,
       ALPACA_API_KEY: env.ALPACA_API_KEY ?? "",
       ALPACA_API_SECRET: env.ALPACA_API_SECRET ?? "",
+      OPENROUTER_API_KEY: env.OPENROUTER_API_KEY ?? "",
     };
   }
 
@@ -90,6 +119,7 @@ export class TradingBot extends Container<Env> {
 // Registry ein, die ContainerProxy beim Abfangen nutzt. Ein Klassenfeld wuerde den Setter umgehen.
 TradingBot.outboundByHost = {
   [STATE_HOST]: (request: Request, env: Env) => handleState(request, env),
+  [AI_HOST]: (request: Request, env: Env) => handleAi(request, env),
 };
 
 async function sha256(text: string): Promise<ArrayBuffer> {

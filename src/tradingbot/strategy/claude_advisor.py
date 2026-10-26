@@ -23,7 +23,7 @@ class ClaudeAdvisorStrategy(Strategy):
     def __init__(self, cfg: StrategyConfig, ai: AiConfig, api_key: str = "", client=None):
         super().__init__(cfg)
         self.ai = ai
-        self.advisor = ClaudeAdvisor(ai, api_key=api_key, client=client)
+        self.advisor = ClaudeAdvisor(ai, api_key=api_key, client=client, futures=cfg.allow_short)
 
     @property
     def warmup_bars(self) -> int:
@@ -54,6 +54,19 @@ class ClaudeAdvisorStrategy(Strategy):
             return Decision(Signal.HOLD, d.reason, atr=atr_value)
 
         close = float(df["close"].iloc[-1])
+        side = (position or {}).get("side", "long") if position else None
+        if d.action == "short" and position is None and self.cfg.allow_short:
+            if d.confidence < self.ai.min_confidence:
+                self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence:.2f}")
+                return Decision(Signal.HOLD, f"KI-Short verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)
+            self.advisor.record(symbol, d, applied=True)
+            return Decision(Signal.SHORT, f"KI: {d.reason}", atr=atr_value)
+        if d.action == "cover" and side == "short":
+            if d.confidence < self.ai.min_confidence_exit:
+                self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence_exit:.2f}")
+                return Decision(Signal.HOLD, f"KI-Ausstieg verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)
+            self.advisor.record(symbol, d, applied=True)
+            return Decision(Signal.COVER, f"KI: {d.reason}", atr=atr_value)
         if d.action == "buy" and position is None:
             if d.confidence < self.ai.min_confidence:
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence:.2f}")
@@ -63,7 +76,7 @@ class ClaudeAdvisorStrategy(Strategy):
             target = self.target_distance(close, atr_value)
             tp = close + target if target is not None else None
             return Decision(Signal.BUY, f"KI: {d.reason}", stop_loss=stop, take_profit=tp, atr=atr_value)
-        if d.action == "sell" and position is not None:
+        if d.action == "sell" and position is not None and side != "short":
             if d.confidence < self.ai.min_confidence_exit:
                 self.advisor.record(symbol, d, applied=False, note=f"Konfidenz unter {self.ai.min_confidence_exit:.2f}")
                 return Decision(Signal.HOLD, f"KI-Verkauf verworfen, Konfidenz {d.confidence:.2f}", atr=atr_value)

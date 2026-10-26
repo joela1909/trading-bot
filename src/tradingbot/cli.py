@@ -106,7 +106,7 @@ def build_bot(settings: Settings) -> TradingBot:
     return bot
 
 
-def _app_queries(bot: TradingBot, settings: Settings, stocks=None) -> dict:
+def _app_queries(bot: TradingBot, settings: Settings, stocks=None, ai=None) -> dict:
     from .app_settings import current
 
     def chart(params: dict) -> dict:
@@ -131,10 +131,14 @@ def _app_queries(bot: TradingBot, settings: Settings, stocks=None) -> dict:
             "stocks": stocks.snapshot, "stocks-chart": stocks.chart,
             "stocks-settings": lambda _p: current(settings, market="stocks"),
         })
+    if ai is not None:
+        from .ai_bot import ai_settings
+
+        queries.update({"ai": ai.snapshot, "ai-chart": ai.chart, "ai-settings": lambda _p: current(ai_settings(settings), True)})
     return queries
 
 
-def _app_commands(bot: TradingBot, settings: Settings, config_path: str, stocks=None) -> dict:
+def _app_commands(bot: TradingBot, settings: Settings, config_path: str, stocks=None, ai=None) -> dict:
     from .app_settings import reset, validate_and_save
 
     def save(body: dict) -> dict:
@@ -205,6 +209,8 @@ def _app_commands(bot: TradingBot, settings: Settings, config_path: str, stocks=
             "stocks-settings-reset": reset_stocks, "stocks-trades-delete-oldest": delete_stock_trades,
             "stocks-account-reset": stock_account_reset,
         })
+    if ai is not None:
+        commands.update({"ai-pause": ai.pause, "ai-resume": ai.resume, "ai-account-reset": ai.account_reset})
     return commands
 
 
@@ -235,6 +241,11 @@ def cmd_run(args: argparse.Namespace) -> int:
 
     stocks = StockRunner(settings)
     stocks.start()
+    # KI-Konto: zweiter Krypto-Papier-Bot, ein Sprachmodell entscheidet
+    from .ai_bot import AiRunner
+
+    ai = AiRunner(settings)
+    ai.start()
 
     server = None
     if settings.bot.dashboard.enabled and not args.no_dashboard:
@@ -246,8 +257,8 @@ def cmd_run(args: argparse.Namespace) -> int:
             server = DashboardServer(
                 bot.get_snapshot, {"pause": bot.pause, "resume": bot.resume}, host=bind, port=port,
                 allowed_hosts=hosts, allow_container_bind=in_container,
-                queries=_app_queries(bot, settings, stocks),
-                commands=_app_commands(bot, settings, args.config, stocks),
+                queries=_app_queries(bot, settings, stocks, ai),
+                commands=_app_commands(bot, settings, args.config, stocks, ai),
             )
             server.start()
             log.info("Dashboard: %s (nur von diesem Rechner erreichbar)", server.url)
@@ -264,6 +275,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         bot.run_forever()
     finally:
         stocks.stop()
+        ai.stop()
         if awake:
             keep_awake(False)
         if server is not None:

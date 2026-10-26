@@ -137,6 +137,21 @@ dashboard:
 # Kurse von Alpaca: kostenloses Papierkonto auf https://alpaca.markets (nur E-Mail), dort "Paper" -> API Keys erzeugen.
 # Schluessel in .env: ALPACA_API_KEY und ALPACA_API_SECRET (Cloudflare: npx wrangler secret put ALPACA_API_KEY ...).
 # Ohne Schluessel laeuft nur der Krypto-Bot. Gehandelt wird auf einem eigenen Papierkonto, Orders gehen nie raus.
+ai_bot:                      # KI-Konto: zweites Krypto-Papierkonto, ein Sprachmodell entscheidet Long/Short/Halten
+  enabled: true
+  # openrouter: freie Modelle ueber openrouter.ai (OPENROUTER_API_KEY; 50 Abfragen/Tag, nach 10 $ Aufladung 1.000/Tag)
+  # workers_ai: Cloudflare, ohne Schluessel (10.000 Neurons/Tag kostenlos, z. B. @cf/google/gemma-4-26b-a4b-it)
+  # anthropic: Claude (ANTHROPIC_API_KEY, kostet je Abfrage, z. B. claude-haiku-5-5)
+  provider: openrouter
+  model: "nvidia/nemotron-3-ultra-550b-a55b:free"   # staerkstes freies Modell auf OpenRouter (Stand Okt. 2026)
+  fallback_models: ["nvidia/nemotron-3.5-super-vl:free", "google/gemma-4-31b-it:free"]
+  symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
+  timeframe: 15m             # eine Abfrage je Paar und Kerze: 3 x 96 = 288 am Tag
+  starting_balance: 1000
+  leverage: 5
+  max_calls_per_day: 300     # Obergrenze, damit das Gratis-Kontingent reicht
+  min_confidence: 0.6
+
 stocks:
   enabled: true
   data_feed: iex             # iex: kostenlos in Echtzeit (eine US-Boerse), sip: alle Boersen (Alpaca-Abo)

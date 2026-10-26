@@ -47,9 +47,8 @@ def test_short_requires_futures_and_symbols_are_mapped():
     assert BotConfig().market_symbol("XRP/USDT") == "XRP/USDT"
 
 
-def test_claude_cannot_short_and_live_futures_is_blocked():
-    with pytest.raises(ValidationError):
-        BotConfig(market="futures", strategy=StrategyConfig(name="claude_advisor", allow_short=True))
+def test_claude_can_short_but_live_futures_is_blocked():
+    BotConfig(market="futures", strategy=StrategyConfig(name="claude_advisor", allow_short=True))  # KI-Konto handelt Long und Short
     s = Settings(bot=BotConfig(market="futures", mode="live"), secrets=Secrets(_env_file=None, live_trading_confirmed=True, exchange_api_key="k", exchange_api_secret="s"))
     with pytest.raises(RuntimeError, match="Papierhandel"):
         s.validate_for_run()

@@ -28,6 +28,8 @@
   "migrations": [{ "tag": "v1", "new_sqlite_classes": ["TradingBot"] }],
 
   // Zustand des Bots (Positionen, Trades, Papierkonto). Anlegen: npx wrangler r2 bucket create trading-bot-state
+  "ai": { "binding": "AI" },
+
   "r2_buckets": [{ "binding": "STATE", "bucket_name": "trading-bot-state" }],
 
   // bremst fehlgeschlagene Anmeldungen: hoechstens 10 je Minute und IP

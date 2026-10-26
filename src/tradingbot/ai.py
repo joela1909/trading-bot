@@ -4,18 +4,21 @@ from __future__ import annotations
 
 import json
 import logging
+import os
+import re
 from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timezone
 
 import anthropic
 import pandas as pd
+import requests
 
 from .config import AiConfig
 
 log = logging.getLogger(__name__)
 
-ACTIONS = ("buy", "sell", "hold")
+ACTIONS = ("buy", "sell", "short", "cover", "hold")
 
 DECISION_SCHEMA = {
     "type": "object",
@@ -40,6 +43,21 @@ Regeln des Systems, die du nicht aendern kannst:
 - confidence ist deine ehrliche Wahrscheinlichkeit zwischen 0 und 1, dass die Entscheidung sich lohnt. Der Bot ignoriert Entscheidungen unter seiner Schwelle.
 - Nutze ausschliesslich die gelieferten Zahlen. Du kennst keine Nachrichten und keine Zukunft. Schreibe nichts, was die Daten nicht hergeben.
 - reason: ein bis zwei Saetze auf Deutsch, hoechstens 300 Zeichen, mit den wichtigsten Zahlen."""
+
+
+FUTURES_PROMPT = """Du bist der Entscheidungsteil eines automatischen Krypto-Handelsbots fuer USDT-Perpetual-Futures.
+Pro neuer abgeschlossener Kerze bekommst du die Marktdaten eines Handelspaars und den Zustand der Position. Du entscheidest genau eine Aktion.
+
+Regeln des Systems, die du nicht aendern kannst:
+- Moegliche Aktionen: buy (Long eroeffnen), short (Short eroeffnen), sell (Long schliessen), cover (Short schliessen), hold.
+- buy und short nur ohne offene Position. sell nur bei offenem Long, cover nur bei offenem Short. Sonst hold.
+- Positionsgroesse, Hebel, Stop-Loss und Take-Profit berechnet der Bot selbst. Du entscheidest nur Richtung und Zeitpunkt.
+- Jeder Handel kostet Gebuehren und Kursabweichung, zusammen etwa 0,2 Prozent. Steige nur bei einer klaren Lage ein. Halten ist der Normalfall.
+- Handle bevorzugt mit dem Trend (z. B. Kurs ueber beiden EMAs und EMAs steigend: eher Long; darunter und fallend: eher Short). In Seitwaertsphasen: hold.
+- Ein offener Trade hat einen Stop-Loss im Bot. Schliesse aktiv nur, wenn die Lage sich erkennbar gegen die Position gedreht hat.
+- confidence ist deine ehrliche Wahrscheinlichkeit zwischen 0 und 1, dass die Entscheidung sich lohnt. Der Bot ignoriert Entscheidungen unter seiner Schwelle.
+- Nutze ausschliesslich die gelieferten Zahlen. Du kennst keine Nachrichten und keine Zukunft.
+- Antworte nur mit einem JSON-Objekt: {"action": "...", "confidence": 0.0, "reason": "..."}. reason: ein bis zwei Saetze auf Deutsch, hoechstens 300 Zeichen."""
 
 
 @dataclass
@@ -87,7 +105,7 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
     pos = context.get("position")
     if pos:
         position_text = (
-            f"LONG offen: Menge {_fmt(pos['amount'])}, Einstieg {_fmt(pos['entry_price'])}, aktueller Gewinn/Verlust {pos['pnl_pct']:+.2f}%, "
+            f"{'SHORT' if pos.get('side') == 'short' else 'LONG'} offen: Menge {_fmt(pos['amount'])}, Einstieg {_fmt(pos['entry_price'])}, aktueller Gewinn/Verlust {pos['pnl_pct']:+.2f}%, "
             f"Stop-Loss {_fmt(pos['stop_loss'])}" + (f", Take-Profit {_fmt(pos['take_profit'])}" if pos.get("take_profit") else "")
         )
     else:
@@ -111,9 +129,15 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
 
 
 class ClaudeAdvisor:
-    def __init__(self, cfg: AiConfig, api_key: str = "", client=None):
+    def __init__(self, cfg: AiConfig, api_key: str = "", client=None, futures: bool = False):
         self.cfg = cfg
-        self.client = client or anthropic.Anthropic(api_key=api_key or None, timeout=cfg.timeout_seconds, max_retries=2)
+        self.system_prompt = FUTURES_PROMPT if futures else SYSTEM_PROMPT
+        if cfg.provider == "workers_ai":
+            self.client = client or WorkersAiClient(cfg)
+        elif cfg.provider == "openrouter":
+            self.client = client or OpenRouterClient(cfg, api_key)
+        else:
+            self.client = client or anthropic.Anthropic(api_key=api_key or None, timeout=cfg.timeout_seconds, max_retries=2)
         self.day: str | None = None
         self.calls = 0
         self.decisions: deque = deque(maxlen=60)
@@ -150,11 +174,18 @@ class ClaudeAdvisor:
         if self.calls >= self.cfg.max_calls_per_day:
             return AiDecision("hold", 0.0, f"Tageslimit von {self.cfg.max_calls_per_day} KI-Aufrufen erreicht", ok=False)
         self.calls += 1
+        if isinstance(self.client, (WorkersAiClient, OpenRouterClient)):
+            try:
+                text = self.client.complete(self.system_prompt, user_prompt)
+            except Exception as exc:  # noqa: BLE001
+                log.warning("Workers AI: %s", exc)
+                return AiDecision("hold", 0.0, f"KI nicht erreichbar ({str(exc)[:80]})", ok=False)
+            return self.parse_text(text)
         try:
             response = self.client.messages.create(
                 model=self.cfg.model,
                 max_tokens=self.cfg.max_tokens,
-                system=SYSTEM_PROMPT,
+                system=self.system_prompt,
                 messages=[{"role": "user", "content": user_prompt}],
                 output_config={"effort": self.cfg.effort, "format": {"type": "json_schema", "schema": DECISION_SCHEMA}},
             )
@@ -177,10 +208,20 @@ class ClaudeAdvisor:
         if stop == "max_tokens":
             return AiDecision("hold", 0.0, "KI-Antwort war abgeschnitten", ok=False)
         text = next((b.text for b in response.content if getattr(b, "type", None) == "text"), None)
+        return ClaudeAdvisor.parse_text(text)
+
+    @staticmethod
+    def parse_text(text) -> AiDecision:
+        if isinstance(text, dict):
+            data = text
+            text = json.dumps(text)
         if not text:
             return AiDecision("hold", 0.0, "KI lieferte keine Antwort", ok=False)
         try:
-            data = json.loads(text)
+            if not isinstance(text, str):
+                raise ValueError
+            m = re.search(r"\{.*\}", text, re.S)  # kleine Modelle schreiben manchmal Text um das JSON
+            data = json.loads(m.group(0) if m else text)
             action = str(data["action"]).lower()
             confidence = float(data["confidence"])
             reason = str(data["reason"]).strip()
@@ -189,3 +230,60 @@ class ClaudeAdvisor:
         if action not in ACTIONS or confidence != confidence:
             return AiDecision("hold", 0.0, "KI-Antwort ungueltig", ok=False)
         return AiDecision(action, min(max(confidence, 0.0), 1.0), reason[:300])
+
+
+class WorkersAiClient:
+    """Sprachmodell von Cloudflare Workers AI. Der Bot im Container schickt die Anfrage an http://ai.tradingbot/,
+    der Worker leitet sie an seine AI-Bindung weiter (kein Schluessel noetig, 10.000 Neurons am Tag kostenlos)."""
+
+    def __init__(self, cfg: AiConfig, url: str | None = None, session: requests.Session | None = None):
+        self.cfg = cfg
+        self.url = url or os.environ.get("TRADINGBOT_AI_URL", "")
+        self.http = session or requests.Session()
+
+    def complete(self, system: str, user: str) -> str | dict:
+        if not self.url:
+            raise RuntimeError("Workers AI nur auf Cloudflare verfuegbar (TRADINGBOT_AI_URL fehlt)")
+        body = {
+            "model": self.cfg.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": 600,
+            "response_format": {"type": "json_schema", "json_schema": DECISION_SCHEMA},
+        }
+        r = self.http.post(self.url, json=body, timeout=self.cfg.timeout_seconds)
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
+        data = r.json()
+        result = data.get("result", data)
+        return result.get("response") if isinstance(result, dict) else result
+
+
+class OpenRouterClient:
+    """Modelle ueber openrouter.ai (OpenAI-kompatibel). Mit `fallback_models` springt OpenRouter selbst auf das
+    naechste Modell, wenn eines ueberlastet ist (freie Modelle sind zu Spitzenzeiten oft knapp)."""
+
+    URL = "https://openrouter.ai/api/v1/chat/completions"
+
+    def __init__(self, cfg: AiConfig, api_key: str, session: requests.Session | None = None):
+        if not api_key:
+            raise RuntimeError("OPENROUTER_API_KEY fehlt")
+        self.cfg = cfg
+        self.http = session or requests.Session()
+        self.http.headers.update({"Authorization": f"Bearer {api_key}", "X-Title": "Trading Bot"})
+
+    def complete(self, system: str, user: str) -> str:
+        body = {
+            "model": self.cfg.model,
+            "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
+            "max_tokens": 2000,
+        }
+        if self.cfg.fallback_models:
+            body["models"] = [self.cfg.model, *self.cfg.fallback_models]
+        r = self.http.post(self.URL, json=body, timeout=self.cfg.timeout_seconds)
+        if r.status_code >= 400:
+            raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
+        data = r.json()
+        if data.get("error"):
+            raise RuntimeError(str(data["error"])[:150])
+        choice = (data.get("choices") or [{}])[0]
+        return (choice.get("message") or {}).get("content") or ""
