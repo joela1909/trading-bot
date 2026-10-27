@@ -160,6 +160,8 @@ class AiConfig(BaseModel):
     # openrouter: Modelle ueber openrouter.ai (OPENROUTER_API_KEY), z. B. freie Modelle mit Endung :free
     provider: Literal["anthropic", "workers_ai", "openrouter"] = "anthropic"
     fallback_models: list[str] = Field(default_factory=list)  # openrouter: Ausweichmodelle, wenn das erste nicht antwortet
+    # Ersatz bei Tageslimit (HTTP 429) des Anbieters: Modell von Cloudflare Workers AI fuer den Rest des Tages ("" = aus)
+    backup_model: str = ""
     model: str = "claude-opus-5-5"
     effort: Literal["low", "medium", "high", "xhigh", "max"] = "medium"
     min_confidence: float = Field(default=0.6, ge=0.0, le=1.0)
@@ -178,6 +180,7 @@ class AiBotConfig(BaseModel):
     provider: Literal["anthropic", "workers_ai", "openrouter"] = "workers_ai"
     model: str = "@cf/google/gemma-4-26b-a4b-it"
     fallback_models: list[str] = Field(default_factory=list)
+    backup_model: str = "@cf/google/gemma-4-26b-a4b-it"  # bei Tageslimit von OpenRouter: Cloudflare Workers AI (kostenlos)
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
     timeframe: str = "15m"
     starting_balance: float = Field(default=1000.0, gt=0)

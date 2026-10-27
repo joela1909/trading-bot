@@ -38,7 +38,7 @@ def ai_settings(settings: Settings) -> Settings:
         keep_awake=False,
         paper={**data["paper"], "starting_balance": a.starting_balance},
         strategy=strategy,
-        ai={**data["ai"], "provider": a.provider, "model": a.model, "fallback_models": a.fallback_models,
+        ai={**data["ai"], "provider": a.provider, "model": a.model, "fallback_models": a.fallback_models, "backup_model": a.backup_model,
             "max_calls_per_day": a.max_calls_per_day,
             "min_confidence": a.min_confidence, "candles_in_prompt": a.candles_in_prompt},
         risk={**data["risk"], **a.risk},
@@ -137,6 +137,7 @@ class AiRunner:
         adv = getattr(self.bot.strategy, "advisor", None)
         if adv is not None:
             base["ai_calls_today"] = adv.calls
+            base["ai_backup_active"] = adv.backup is not None and adv.limited_day == adv.day
             base["ai_decisions"] = list(adv.decisions)[-20:]
         return {**snap, **base}
 

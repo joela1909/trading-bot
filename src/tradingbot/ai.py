@@ -178,6 +178,11 @@ class ClaudeAdvisor:
             self.client = client or OpenRouterClient(cfg, api_key)
         else:
             self.client = client or anthropic.Anthropic(api_key=api_key or None, timeout=cfg.timeout_seconds, max_retries=2)
+        # Ersatzmodell, wenn der Anbieter sein Tageslimit meldet (nur mit Workers AI, also auf Cloudflare)
+        self.backup = None
+        if cfg.backup_model and cfg.provider != "workers_ai" and os.environ.get("TRADINGBOT_AI_URL"):
+            self.backup = WorkersAiClient(cfg.model_copy(update={"model": cfg.backup_model}))
+        self.limited_day: str | None = None  # Tag, an dem der Anbieter sein Limit gemeldet hat
         self.day: str | None = None
         self.calls = 0
         self.decisions: deque = deque(maxlen=60)
@@ -215,12 +220,21 @@ class ClaudeAdvisor:
             return AiDecision("hold", 0.0, f"Tageslimit von {self.cfg.max_calls_per_day} KI-Aufrufen erreicht", ok=False)
         self.calls += 1
         if isinstance(self.client, (WorkersAiClient, OpenRouterClient)):
+            client = self.backup if self.backup is not None and self.limited_day == self.day else self.client
             try:
-                text = self.client.complete(self.system_prompt, user_prompt)
+                text = client.complete(self.system_prompt, user_prompt)
             except Exception as exc:  # noqa: BLE001
-                log.warning("Workers AI: %s", exc)
+                if "429" in str(exc) and self.backup is not None and client is not self.backup:
+                    # Tageslimit erreicht: fuer den Rest des Tages das Ersatzmodell nehmen
+                    log.warning("KI: Tageslimit beim Anbieter, weiter mit %s", self.backup.cfg.model)
+                    self.limited_day = self.day
+                    return self.ask_backup(user_prompt)
+                log.warning("KI: %s", exc)
                 return AiDecision("hold", 0.0, f"KI nicht erreichbar ({str(exc)[:80]})", ok=False)
-            return self.parse_text(text)
+            d = self.parse_text(text)
+            if client is self.backup:
+                d.reason = f"[Ersatzmodell] {d.reason}"[:300]
+            return d
         try:
             response = self.client.messages.create(
                 model=self.cfg.model,
@@ -239,6 +253,14 @@ class ClaudeAdvisor:
             log.error("Anthropic-API-Fehler %s: %s", exc.status_code, exc.message)
             return AiDecision("hold", 0.0, f"KI-Fehler {exc.status_code}", ok=False)
         return self.parse(response)
+
+    def ask_backup(self, user_prompt: str) -> AiDecision:
+        try:
+            d = self.parse_text(self.backup.complete(self.system_prompt, user_prompt))
+        except Exception as exc:  # noqa: BLE001
+            return AiDecision("hold", 0.0, f"Ersatzmodell nicht erreichbar ({str(exc)[:80]})", ok=False)
+        d.reason = f"[Ersatzmodell] {d.reason}"[:300]
+        return d
 
     @staticmethod
     def parse(response) -> AiDecision:

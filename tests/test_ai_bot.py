@@ -100,3 +100,20 @@ def test_liquidity_zones_orderbook_and_positioning():
     assert abs(mid - price) / price < 0.01 and "mehr Kaeufer" in ob[0] and any("Kauf-Waende" in x for x in ob)
     ctx = LiquidityContext(ex)("BTC/USDT:USDT", df)
     assert any("Funding" in x for x in ctx) and any("Open Interest" in x and "+10.00 %" in x for x in ctx)
+
+
+def test_openrouter_limit_switches_to_backup_for_the_day(monkeypatch):
+    monkeypatch.setenv("TRADINGBOT_AI_URL", "http://ai.tradingbot/")
+
+    class LimitedSession(FakeSession):
+        def post(self, url, json=None, timeout=None):
+            self.bodies.append((url, json))
+            return FakeResp(429, {"error": {"message": "Rate limit exceeded: free-models-per-day"}})
+
+    cfg = AiConfig(provider="openrouter", model="a:free", backup_model="@cf/google/gemma-4-26b-a4b-it")
+    sess = LimitedSession({})
+    adv = ClaudeAdvisor(cfg, client=OpenRouterClient(cfg, "key", session=sess))
+    adv.backup.complete = lambda system, user: '{"action": "hold", "confidence": 0.5, "reason": "ruhig", "stop_loss": null, "take_profit": null}'
+    d1, d2 = adv.ask("p"), adv.ask("p")
+    assert d1.ok and d1.reason.startswith("[Ersatzmodell]") and d2.reason.startswith("[Ersatzmodell]")
+    assert len(sess.bodies) == 1, "nach dem Limit nicht mehr bei OpenRouter fragen"
