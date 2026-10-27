@@ -19,6 +19,7 @@ quote_currency: USDT
 # Kerzen-Zeitrahmen fuer die Strategie (1m, 5m, 15m, 1h, 4h, 1d ...)
 # 1m: sehr viele kleine Bewegungen, die Gebuehren fressen einen grossen Teil jedes Gewinns.
 timeframe: 1m
+timeframes: [5m, 15m, 1h, 4h]   # 1m wuerde den kleinen Container auslasten; handeln gleichzeitig, je eigener Bot mit eigenem Papierkonto (timeframe oben ist der Haupt-Zeitrahmen)
 
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
@@ -147,6 +148,7 @@ ai_bot:                      # KI-Konto: zweites Krypto-Papierkonto, ein Sprachm
   fallback_models: ["nvidia/nemotron-3.5-super-vl:free", "google/gemma-4-31b-it:free"]
   symbols: [BTC/USDT, ETH/USDT, SOL/USDT]
   timeframe: 15m             # eine Abfrage je Paar und Kerze: 3 x 96 = 288 am Tag
+  timeframes: [1h, 4h]       # dazu je ein eigenes KI-Konto (3 x 24 + 3 x 6 = 90 Abfragen mehr); 1m/5m waeren zu viele Abfragen
   starting_balance: 1000
   leverage: 5
   max_calls_per_day: 300     # Obergrenze, damit das Gratis-Kontingent reicht
@@ -157,6 +159,7 @@ stocks:
   data_feed: iex             # iex: kostenlos in Echtzeit (eine US-Boerse), sip: alle Boersen (Alpaca-Abo)
   symbols: [AAPL, MSFT, NVDA, TSLA, AMZN, META, SPY, QQQ]
   timeframe: 5m              # 1m-Kerzen sind bei IEX lueckenhaft, 5m ist stabil
+  timeframes: [15m, 1h]      # handeln gleichzeitig, je eigenes Aktienkonto (mehr waere fuer den kleinen Container zu viel)
   poll_interval_seconds: 15  # kostenlos 200 Anfragen pro Minute
   starting_balance: 10000    # USD
   fee_pct: 0.0               # Alpaca: keine Kommission

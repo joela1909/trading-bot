@@ -393,3 +393,20 @@ def test_track_record_filter_blocks_after_losing_trades(settings, tmp_path, monk
     results["pnl"] = [-1.0, -1.0]
     bot._track_cache.clear()
     assert bot._track_record("BTC/USDT", df)[0], "zu wenig Vorgeschichte: erlaubt"
+
+
+def test_realtime_recomputes_at_most_every_tenth_candle(settings, tmp_path):
+    full = make_ohlcv(trend_closes())
+    settings.bot.strategy = settings.bot.strategy.model_copy(update={"realtime_signals": True})
+    bot, _, _ = _make_bot(settings, FakeFeed(full), tmp_path)
+    calls = []
+    orig = bot.strategy.prepare
+    bot.strategy.prepare = lambda df: calls.append(1) or orig(df)
+    bot.run_once()
+    bot.run_once()
+    assert len(calls) == 1, "zweite Runde innerhalb einer Zehntel-Kerze nutzt das Ergebnis weiter"
+    key = next(iter(bot._live_prepared))
+    c, df, _, last = bot._live_prepared[key]
+    bot._live_prepared[key] = (c, df, 0.0, last)  # Zeit abgelaufen
+    bot.run_once()
+    assert len(calls) == 2

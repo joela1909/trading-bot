@@ -117,3 +117,12 @@ def test_openrouter_limit_switches_to_backup_for_the_day(monkeypatch):
     d1, d2 = adv.ask("p"), adv.ask("p")
     assert d1.ok and d1.reason.startswith("[Ersatzmodell]") and d2.reason.startswith("[Ersatzmodell]")
     assert len(sess.bodies) == 1, "nach dem Limit nicht mehr bei OpenRouter fragen"
+
+
+def test_workers_ai_reads_both_answer_formats():
+    from tradingbot.ai import WorkersAiClient
+
+    cfg = AiConfig(provider="workers_ai", model="@cf/x")
+    for data in ({"result": {"response": '{"action":"hold"}'}},
+                 {"result": {"choices": [{"message": {"content": '{"action":"hold"}'}}]}}):
+        assert WorkersAiClient(cfg, url="http://ai/", session=FakeSession(data)).complete("s", "u") == '{"action":"hold"}'

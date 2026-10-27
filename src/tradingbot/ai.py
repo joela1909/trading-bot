@@ -324,7 +324,16 @@ class WorkersAiClient:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
         data = r.json()
         result = data.get("result", data)
-        return result.get("response") if isinstance(result, dict) else result
+        if not isinstance(result, dict):
+            return result
+        # Je nach Modell: {"response": ...} oder OpenAI-Format {"choices": [{"message": {"content": ...}}]}
+        if result.get("response") not in (None, ""):
+            return result["response"]
+        choices = result.get("choices") or []
+        if choices:
+            msg = choices[0].get("message") or {}
+            return msg.get("content") or msg.get("reasoning_content") or choices[0].get("text") or ""
+        raise RuntimeError(f"unbekanntes Antwortformat: {', '.join(result)[:120]}")
 
 
 class OpenRouterClient:

@@ -31,13 +31,13 @@ from .synthetic import make_series
 log = logging.getLogger(__name__)
 
 
-def build_bot(settings: Settings) -> TradingBot:
+def build_bot(settings: Settings, suffix: str = "") -> TradingBot:
     cfg = settings.bot
     mode = settings.mode
     state_dir = Path(cfg.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
 
-    feed = CcxtDataFeed(cfg.exchange, market_type=cfg.market)
+    feed = CcxtDataFeed.shared(cfg.exchange, market_type=cfg.market)
     if mode == "live":
         broker = LiveBroker(
             cfg.exchange,
@@ -55,7 +55,7 @@ def build_bot(settings: Settings) -> TradingBot:
             cfg.paper.fee_pct,
             cfg.paper.slippage_pct,
             leverage=cfg.leverage,
-            state_path=state_dir / "paper_futures_balances.json",
+            state_path=state_dir / f"paper_futures_balances{suffix}.json",
         )
     else:
         broker = PaperBroker(
@@ -64,7 +64,7 @@ def build_bot(settings: Settings) -> TradingBot:
             cfg.paper.starting_balance,
             cfg.paper.fee_pct,
             cfg.paper.slippage_pct,
-            state_path=state_dir / "paper_balances.json",
+            state_path=state_dir / f"paper_balances{suffix}.json",
         )
 
     sec = settings.secrets
@@ -74,7 +74,7 @@ def build_bot(settings: Settings) -> TradingBot:
         notifier = Notifier()
 
     # Futures bekommen einen eigenen Zustand, damit sich Spot- und Futures-Positionen nie vermischen
-    state_path = state_dir / (f"state_{mode}_futures.json" if cfg.is_futures else f"state_{mode}.json")
+    state_path = state_dir / (f"state_{mode}_futures{suffix}.json" if cfg.is_futures else f"state_{mode}{suffix}.json")
     bot = TradingBot(
         settings=settings,
         feed=feed,
@@ -88,8 +88,8 @@ def build_bot(settings: Settings) -> TradingBot:
     spot_signals = cfg.strategy.signal_source == "spot" and cfg.market != "spot"
     if spot_signals:
         # Signale und Chart aus Spot-Kursen (wie der TradingView-Chart auf dem Spot-Paar), gehandelt auf cfg.market
-        bot.signal_feed = CcxtDataFeed(cfg.exchange, market_type="spot")
-    bot.chart_feed = CcxtDataFeed(cfg.exchange, market_type="spot" if spot_signals else cfg.market)  # eigener Zugang fuer den Chart
+        bot.signal_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot")
+    bot.chart_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot" if spot_signals else cfg.market)
     if cfg.scanner_top > 0 and cfg.is_futures:
         from .insights import CryptoScanner
 
@@ -218,7 +218,14 @@ def cmd_run(args: argparse.Namespace) -> int:
     settings = load_settings(args.config)
     setup_logging(settings.bot.log_dir, logging.DEBUG if args.verbose else logging.INFO)
     settings.validate_for_run()
-    bot = build_bot(settings)
+    if settings.bot.timeframes and not args.once:
+        from .multi_tf import MultiBot
+
+        # mehrere Zeitrahmen gleichzeitig, je eigener Bot mit eigenem Papierkonto
+        bot = MultiBot.build(settings, settings.bot.timeframes, build_bot)
+        log.info("Krypto handelt auf %s", ", ".join(bot.timeframes))
+    else:
+        bot = build_bot(settings)
     if getattr(bot.strategy, "backtest_only", False):
         print(f"Fehler: Die Strategie {bot.strategy.name} ist bisher nur im Backtest verfuegbar, nicht im Papier- oder Live-Handel.", file=sys.stderr)
         return 2

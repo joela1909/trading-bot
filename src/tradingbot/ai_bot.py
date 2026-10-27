@@ -52,15 +52,15 @@ def ai_settings(settings: Settings) -> Settings:
     return Settings(bot=BotConfig(**data), secrets=settings.secrets.model_copy(update={"trading_mode": "paper"}))
 
 
-def build_ai_bot(settings: Settings, feed=None, client=None) -> TradingBot:
+def build_ai_bot(settings: Settings, feed=None, client=None, suffix: str = "") -> TradingBot:
     s = ai_settings(settings)
     cfg = s.bot
     state_dir = Path(cfg.state_dir)
     state_dir.mkdir(parents=True, exist_ok=True)
-    feed = feed or CcxtDataFeed(cfg.exchange, market_type="futures")
+    feed = feed or CcxtDataFeed.shared(cfg.exchange, market_type="futures")
     broker = PaperFuturesBroker(feed, cfg.quote_currency, cfg.paper.starting_balance, cfg.paper.fee_pct, cfg.paper.slippage_pct,
-                                leverage=cfg.leverage, state_path=state_dir / BALANCE_FILE)
-    state_path = state_dir / STATE_FILE
+                                leverage=cfg.leverage, state_path=state_dir / BALANCE_FILE.replace(".json", f"{suffix}.json"))
+    state_path = state_dir / STATE_FILE.replace(".json", f"{suffix}.json")
     bot = TradingBot(
         settings=s,
         feed=feed,
@@ -74,8 +74,8 @@ def build_ai_bot(settings: Settings, feed=None, client=None) -> TradingBot:
         state_path=state_path,
     )
     if cfg.strategy.signal_source == "spot":
-        bot.signal_feed = CcxtDataFeed(cfg.exchange, market_type="spot")
-    bot.chart_feed = CcxtDataFeed(cfg.exchange, market_type="spot" if bot.signal_feed is not None else "futures")
+        bot.signal_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot")
+    bot.chart_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot" if bot.signal_feed is not None else "futures")
     if getattr(feed, "exchange", None) is not None:
         from .insights import LiquidityContext
 
@@ -108,7 +108,7 @@ class AiRunner:
             self.problem = "OPENROUTER_API_KEY fehlt"
             return
         try:
-            self.bot = build_ai_bot(self.settings)
+            self.bot = self._build()
         except Exception as exc:  # noqa: BLE001
             self.problem = f"KI-Konto startet nicht: {exc}"
             log.warning("KI-Konto: %s", exc)
@@ -116,6 +116,18 @@ class AiRunner:
         self.thread = threading.Thread(target=self._run, name="ki", daemon=True)
         self.thread.start()
         log.info("KI-Konto gestartet: %s, %s, %s", ", ".join(self.bot.cfg.symbols), self.bot.cfg.timeframe, self.cfg.model)
+
+    def _build(self):
+        """Ein KI-Bot je Zeitrahmen (ai_bot.timeframe + ai_bot.timeframes), zusammengefasst als MultiBot."""
+        from .multi_tf import MultiBot, ordered_timeframes
+
+        primary = self.cfg.timeframe
+        bots = {}
+        for tf in ordered_timeframes(primary, self.cfg.timeframes):
+            a = self.settings.bot.ai_bot.model_copy(update={"timeframe": tf})
+            s = self.settings.model_copy(update={"bot": self.settings.bot.model_copy(deep=True, update={"ai_bot": a})})
+            bots[tf] = build_ai_bot(s, suffix="" if tf == primary else f"_{tf}")
+        return MultiBot(bots, primary)
 
     def _run(self) -> None:
         try:
@@ -134,11 +146,13 @@ class AiRunner:
         if self.bot is None:
             return base
         snap = self.bot.get_snapshot()
-        adv = getattr(self.bot.strategy, "advisor", None)
-        if adv is not None:
-            base["ai_calls_today"] = adv.calls
-            base["ai_backup_active"] = adv.backup is not None and adv.limited_day == adv.day
-            base["ai_decisions"] = list(adv.decisions)[-20:]
+        advs = [(tf, getattr(b.strategy, "advisor", None)) for tf, b in self.bot.bots.items()]
+        advs = [(tf, a) for tf, a in advs if a is not None]
+        if advs:
+            base["ai_calls_today"] = sum(a.calls for _, a in advs)
+            base["ai_backup_active"] = any(a.backup is not None and a.limited_day == a.day for _, a in advs)
+            decisions = [{**d, "timeframe": tf} for tf, a in advs for d in a.decisions]
+            base["ai_decisions"] = sorted(decisions, key=lambda d: d["ts"])[-30:]
         return {**snap, **base}
 
     def chart(self, params: dict) -> dict:

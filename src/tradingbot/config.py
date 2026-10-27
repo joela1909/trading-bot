@@ -183,6 +183,7 @@ class AiBotConfig(BaseModel):
     backup_model: str = "@cf/google/gemma-4-26b-a4b-it"  # bei Tageslimit von OpenRouter: Cloudflare Workers AI (kostenlos)
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT", "ETH/USDT", "SOL/USDT"])
     timeframe: str = "15m"
+    timeframes: list[str] = Field(default_factory=list)  # weitere Zeitrahmen mit eigenem KI-Konto
     starting_balance: float = Field(default=1000.0, gt=0)
     leverage: float = Field(default=5.0, ge=1.0, le=100.0)
     allow_short: bool = True
@@ -208,6 +209,7 @@ class StocksConfig(BaseModel):
     data_feed: Literal["iex", "sip"] = "iex"  # iex: kostenlos in Echtzeit, sip: alle US-Boersen (Abo)
     symbols: list[str] = Field(default_factory=lambda: ["AAPL", "MSFT", "NVDA", "TSLA", "AMZN", "META", "SPY", "QQQ"])
     timeframe: str = "5m"
+    timeframes: list[str] = Field(default_factory=list)  # weitere Zeitrahmen mit eigenem Aktienkonto
     poll_interval_seconds: int = Field(default=15, ge=5)  # Alpaca erlaubt kostenlos 200 Anfragen pro Minute
     starting_balance: float = Field(default=10000.0, gt=0)
     fee_pct: float = Field(default=0.0, ge=0)  # Alpaca: keine Kommission
@@ -261,6 +263,8 @@ class BotConfig(BaseModel):
     symbols: list[str] = Field(default_factory=lambda: ["BTC/USDT"])
     quote_currency: str = "USDT"
     timeframe: str = "1h"
+    # weitere Zeitrahmen, die gleichzeitig handeln (je eigener Bot mit eigenem Papierkonto); leer = nur timeframe
+    timeframes: list[str] = Field(default_factory=list)
     poll_interval_seconds: int = 60
     # Krypto-Scanner: alle 6 Stunden die meistgehandelten USDT-Perpetuals dazunehmen (0 = aus), wie trader-scanner
     scanner_top: int = Field(default=0, ge=0, le=30)

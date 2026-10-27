@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from pathlib import Path
 from typing import Protocol
@@ -52,6 +53,18 @@ class DataFeed(Protocol):
 class CcxtDataFeed:
     """Oeffentliche Marktdaten ueber ccxt (ohne API-Key nutzbar)."""
 
+    _shared: dict = {}
+    _shared_lock = threading.Lock()
+
+    @classmethod
+    def shared(cls, exchange_id: str, market_type: str = "spot") -> "CcxtDataFeed":
+        """Gemeinsame Verbindung je Boerse und Markt fuer alle Bots im Prozess (spart je Verbindung 120-180 MB)."""
+        key = (exchange_id, market_type)
+        with cls._shared_lock:
+            if key not in cls._shared:
+                cls._shared[key] = cls(exchange_id, market_type=market_type)
+            return cls._shared[key]
+
     def __init__(self, exchange_id: str, ccxt_exchange=None, market_type: str = "spot"):
         if ccxt_exchange is None:
             import ccxt
@@ -63,11 +76,14 @@ class CcxtDataFeed:
             ccxt_exchange = cls(params)
         self.exchange = ccxt_exchange
         self._markets_loaded = False
+        self._markets_lock = threading.Lock()
 
     def _ensure_markets(self) -> None:
         if not self._markets_loaded:
-            self.exchange.load_markets()
-            self._markets_loaded = True
+            with self._markets_lock:  # mehrere Bots teilen sich die Verbindung: nur einmal laden
+                if not self._markets_loaded:
+                    self.exchange.load_markets()
+                    self._markets_loaded = True
 
     MAX_PER_REQUEST = 1000
 

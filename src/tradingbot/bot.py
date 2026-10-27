@@ -57,6 +57,7 @@ class TradingBot:
         # je Paar: abgeschlossene Kerzen und das fertig gerechnete Ergebnis der Strategie fuer die letzte Kerze
         self._candles: dict = {}
         self._prepared: dict = {}
+        self._live_prepared: dict = {}  # Echtzeit: (letzte geschlossene Kerze, df, Zeitpunkt, letzte Kerze) je Paar
         # Chart in anderen Zeitrahmen: eigener Datenzugang (wird in build_bot gesetzt) und kurzer Zwischenspeicher
         self.chart_feed = None
         self.signal_feed = None  # eigener Datenzugang fuer Signal-Kerzen (z. B. Spot), sonst der Handels-Feed
@@ -529,7 +530,8 @@ class TradingBot:
 
         need = self.strategy.warmup_bars + 10
         if self.cfg.protections.track_record_trades > 0:
-            need += self.cfg.protections.track_record_bars  # Vorgeschichte fuer den Bilanz-Filter
+            # Vorgeschichte fuer den Bilanz-Filter: track_record_bars gilt fuer 1m-Kerzen, groessere entsprechend weniger
+            need += max(200, self.cfg.protections.track_record_bars * 60 // timeframe_seconds(self.cfg.timeframe))
         tf = self.cfg.timeframe
         cached = self._candles.get(symbol)
         if cached is not None and len(cached) >= need:
@@ -574,14 +576,23 @@ class TradingBot:
             return
         realtime = self.cfg.strategy.realtime_signals
         if realtime:
-            # Echtzeit: die laufende Kerze rechnet mit, bei jeder Runde neu
+            # Echtzeit: die laufende Kerze rechnet mit. Neu gerechnet wird bei jedem Kerzenschluss und dazwischen
+            # hoechstens alle Zehntel-Kerze (1m: 6 s, 15m: 90 s, 1h: 6 min); das spart viel Rechenzeit.
+            # Stops und Ziele prueft der Bot trotzdem in jeder Runde mit dem aktuellen Kurs.
             import pandas as pd
 
-            live = self._forming_candle(symbol, int(raw["timestamp"].iloc[-1]))
-            if live is not None:
-                raw = pd.concat([raw, live], ignore_index=True)
-            df = self.strategy.prepare(raw)
-            last_ts = int(raw["timestamp"].iloc[-1])
+            closed_ts = int(raw["timestamp"].iloc[-1])
+            refresh = max(5.0, timeframe_seconds(self.cfg.timeframe) / 10)
+            hit = self._live_prepared.get(symbol)
+            if hit is not None and hit[0] == closed_ts and time.time() - hit[2] < refresh:
+                df, last_ts = hit[1], hit[3]
+            else:
+                live = self._forming_candle(symbol, closed_ts)
+                if live is not None:
+                    raw = pd.concat([raw, live], ignore_index=True)
+                df = self.strategy.prepare(raw)
+                last_ts = int(raw["timestamp"].iloc[-1])
+                self._live_prepared[symbol] = (closed_ts, df, time.time(), last_ts)
         else:
             last_ts = int(raw["timestamp"].iloc[-1])
             # Signale haengen nur an abgeschlossenen Kerzen: innerhalb einer Kerze nicht neu rechnen

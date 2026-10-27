@@ -53,7 +53,7 @@ def stock_settings(settings: Settings) -> Settings:
     return Settings(bot=BotConfig(**data), secrets=settings.secrets.model_copy(update={"trading_mode": "paper"}))
 
 
-def build_stock_bot(settings: Settings, feed=None, chart_feed=None) -> TradingBot:
+def build_stock_bot(settings: Settings, feed=None, chart_feed=None, suffix: str = "") -> TradingBot:
     s = stock_settings(settings)
     cfg = s.bot
     sec = settings.secrets
@@ -64,8 +64,8 @@ def build_stock_bot(settings: Settings, feed=None, chart_feed=None) -> TradingBo
         chart_feed = AlpacaDataFeed(sec.alpaca_api_key, sec.alpaca_api_secret, feed=settings.bot.stocks.data_feed)
     # Futures-Papierkonto: kann Long und Short wie ein Aktienkonto mit Leerverkauf, Hebel wie eingestellt
     broker = PaperFuturesBroker(feed, cfg.quote_currency, cfg.paper.starting_balance, cfg.paper.fee_pct, cfg.paper.slippage_pct,
-                                leverage=cfg.leverage, state_path=state_dir / BALANCE_FILE)
-    state_path = state_dir / STATE_FILE
+                                leverage=cfg.leverage, state_path=state_dir / BALANCE_FILE.replace(".json", f"{suffix}.json"))
+    state_path = state_dir / STATE_FILE.replace(".json", f"{suffix}.json")
     bot = TradingBot(
         settings=s,
         feed=feed,
@@ -104,7 +104,7 @@ class StockRunner:
             log.warning("Aktien: %s. Ohne sie startet nur der Krypto-Bot.", self.problem)
             return
         try:
-            bot = build_stock_bot(self.settings)
+            bot = self._build()
             bot.feed.check()
         except AlpacaError as exc:
             self.problem = str(exc)
@@ -114,17 +114,31 @@ class StockRunner:
         self._base_symbols = list(bot.cfg.symbols)
         self._scan_day: str | None = None
         if self.cfg.scanner_top > 0:
-            bot.before_cycle = self._refresh_universe
+            bot.primary.before_cycle = self._refresh_universe
         if self.cfg.news_block_minutes > 0:
             if self.cfg.news_mode == "direction":
                 from .insights import NewsDirectionGuard
 
-                bot.entry_guard = NewsDirectionGuard(bot.feed.recent_news, self.cfg.news_block_minutes)
+                guard = NewsDirectionGuard(bot.feed.recent_news, self.cfg.news_block_minutes)
             else:
-                bot.entry_guard = self._news_guard
+                guard = self._news_guard
+            for b in bot.all_bots():
+                b.entry_guard = guard
         self.thread = threading.Thread(target=self._run, name="aktien", daemon=True)
         self.thread.start()
         log.info("Aktien-Bot gestartet: %s, %s", ", ".join(bot.cfg.symbols), bot.cfg.timeframe)
+
+    def _build(self):
+        """Ein Aktien-Bot je Zeitrahmen (stocks.timeframe + stocks.timeframes), zusammengefasst als MultiBot."""
+        from .multi_tf import MultiBot, ordered_timeframes
+
+        primary = self.cfg.timeframe
+        bots = {}
+        for tf in ordered_timeframes(primary, self.cfg.timeframes):
+            st = self.settings.bot.stocks.model_copy(update={"timeframe": tf})
+            s = self.settings.model_copy(update={"bot": self.settings.bot.model_copy(deep=True, update={"stocks": st})})
+            bots[tf] = build_stock_bot(s, suffix="" if tf == primary else f"_{tf}")
+        return MultiBot(bots, primary)
 
     def _refresh_universe(self) -> None:
         """Einmal je Handelstag nach 9:35 New York: meistgehandelte Aktien zur festen Liste dazunehmen."""
@@ -136,9 +150,10 @@ class StockRunner:
             return
         self._scan_day = day
         scanned = self.bot.feed.most_actives(self.cfg.scanner_top)
-        keep = [s for s in self.bot.state.positions if s not in self._base_symbols]  # offene Positionen bleiben
+        keep = [s for s in self.bot.open_symbols() if s not in self._base_symbols]  # offene Positionen bleiben
         symbols = list(dict.fromkeys(self._base_symbols + scanned + keep))
-        self.bot.cfg.symbols = symbols
+        for b in self.bot.all_bots():
+            b.cfg.symbols = list(symbols)
         self.scanned = scanned
         log.info("Aktien-Scanner %s: %s", day, ", ".join(scanned) or "nichts gefunden")
 

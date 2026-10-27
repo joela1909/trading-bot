@@ -233,6 +233,10 @@
     var stat = function (label, value, cls) { var sp = el('span', '', label + ' '); sp.appendChild(el('b', cls || '', value)); hs.appendChild(sp); };
     if (market === 'stocks') stat('Börse', s.market_open ? 'offen' : 'zu', s.market_open ? 'pos' : '');
     if (market === 'ai') stat('KI-Abfragen heute', String(s.ai_calls_today || 0), '');
+    // mehrere Zeitrahmen: Kapital je Teilkonto
+    (s.accounts || []).forEach(function (a) {
+      if (s.accounts.length > 1) stat(a.timeframe, nf(a.equity, 0) + (a.positions ? ' · ' + a.positions + ' offen' : ''), a.return_pct > 0 ? 'pos' : a.return_pct < 0 ? 'neg' : '');
+    });
     stat('Heute', signed(s.day_pnl_pct, 2, ' %'), tone(s.day_pnl_pct));
     stat('Gesamt', signed(s.return_pct, 2, ' %'), tone(s.return_pct));
     stat('Frei', nf(s.free_quote, 2));
@@ -289,6 +293,7 @@
     t.appendChild(sideTag(p.side));
     if (triggerTag(p.strategy)) t.appendChild(triggerTag(p.strategy));
     if (p.leverage > 1) t.appendChild(el('span', 'row-note', nf(p.leverage, 0) + 'x'));
+    if (p.timeframe) t.appendChild(el('span', 'row-note', p.timeframe));
     main.appendChild(t);
     main.appendChild(el('span', 'row-sub', 'Einstieg ' + price(p.entry_price) + ' · Stop ' + price(p.stop_loss) + (p.take_profit === null ? '' : ' · Ziel ' + price(p.take_profit))));
     main.appendChild(el('span', 'row-sub', nf(p.notional, 0) + ' ' + q + ' · Risiko ' + nf(p.risk_quote, 2) + (p.liquidation ? ' · Liq. ' + price(p.liquidation) : '') + ' · seit ' + clock(p.opened_at)));
@@ -732,6 +737,7 @@
     var title = el('span', 'row-title', coin(t.symbol));
     title.appendChild(sideTag(t.side));
     if (triggerTag(t.strategy)) title.appendChild(triggerTag(t.strategy));
+    if (t.timeframe) title.appendChild(el('span', 'row-note', t.timeframe));
     main.appendChild(title);
     main.appendChild(el('span', 'row-sub', when(t.opened_at) + ' – ' + clock(t.closed_at) + ' · ' + duration(t.opened_at, t.closed_at) + ' · ' + reasonText(t.reason)));
     if (t.strategy && t.strategy.indexOf('+') > 0) main.appendChild(el('span', 'row-sub', 'Ausgelöst von ' + t.strategy.split('+').map(function (n) { return SHORT[n] || n; }).join(', ')));
