@@ -187,6 +187,7 @@
           <label class="row"><span>Sperre nach Stop-Loss-Serie</span><input id="s-slguard" type="checkbox" class="switch"></label>
           <label class="row"><span>Abkühlphase nach Ausstieg</span><input id="s-cooldown" type="checkbox" class="switch"></label>
           <label class="row"><span>Bilanz-Filter</span><input id="s-track" type="checkbox" class="switch"></label>
+          <label class="row"><span>Drawdown-Grenze (%)</span><input id="s-maxdd" type="number" inputmode="decimal" min="0" max="100" step="1" placeholder="aus"></label>
           <label class="row"><span>Ziel mind. x Kosten</span><input id="s-costratio" type="number" inputmode="decimal" min="0" max="20" step="0.5" aria-describedby="s-costhint"></label>
         </div>
         <p class="footnote" id="s-levhint"></p>
@@ -194,6 +195,7 @@
         <p class="footnote" id="s-slguardhint"></p>
         <p class="footnote" id="s-cooldownhint"></p>
         <p class="footnote" id="s-trackhint"></p>
+        <p class="footnote">Drawdown-Grenze: Fällt ein Konto so viele Prozent unter sein Hoch, steigt der Bot 4 Stunden lang nicht ein. Leer oder 0 heißt aus, 100 heißt praktisch nie.</p>
       </fieldset>
 
       <fieldset>

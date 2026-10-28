@@ -1023,6 +1023,7 @@
     $('s-cooldown').checked = cd > 0;
     form.trackTrades = pr.track_record_trades > 0 ? pr.track_record_trades : 3;
     $('s-track').checked = pr.track_record_trades > 0;
+    $('s-maxdd').value = pr.max_drawdown_pct > 0 ? pr.max_drawdown_pct : '';
     $('s-trackhint').textContent = 'Bilanz-Filter: Vor jedem Einstieg spielt der Bot dieselbe Strategie auf den letzten Tagen dieses Paars nach. '
       + 'Haben ihre letzten ' + form.trackTrades + ' Trades im Schnitt verloren, steigt er nicht ein. Im Test über 60 Tage: weniger als halb so viel Verlust, aber noch kein Gewinn.';
     $('s-cooldownhint').textContent = 'Abkühlphase: Nach einem Ausstieg steigt der Bot ' + form.cooldownCandles + ' Kerzen lang nicht wieder in dasselbe Paar ein. Aus heißt: sofortiger Wiedereinstieg möglich.';
@@ -1144,7 +1145,8 @@
       protections: {
         stoploss_guard_stops: $('s-slguard').checked ? (form.slguardStops || 3) : 0,
         cooldown_candles: $('s-cooldown').checked ? (form.cooldownCandles || 5) : 0,
-        track_record_trades: $('s-track').checked ? (form.trackTrades || 3) : 0
+        track_record_trades: $('s-track').checked ? (form.trackTrades || 3) : 0,
+        max_drawdown_pct: Math.min(100, Math.max(0, parseFloat($('s-maxdd').value) || 0))
       },
       risk: {
         risk_per_trade_pct: parseFloat($('s-risk').value),

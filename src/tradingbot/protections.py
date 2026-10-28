@@ -72,6 +72,9 @@ class Protections:
         if self.lock_reason == "Drawdown-Grenze" and self.tf > 60_000:
             started = self.locked_until - self.cfg.max_drawdown_lock_candles * self.tf
             self.locked_until = min(self.locked_until, started + self.cfg.max_drawdown_lock_candles * 60_000)
+        # Drawdown-Grenze abgeschaltet: laufende Sperre aufheben und das Hoch neu beginnen
+        if self.cfg.max_drawdown_pct <= 0 and self.lock_reason == "Drawdown-Grenze":
+            self.locked_until, self.lock_reason, self.peak = 0, "", None
         # Sperre nach Stop-Loss-Serie abgeschaltet: eine noch laufende Sperre dieser Art sofort aufheben
         if self.cfg.stoploss_guard_stops <= 0 and self.lock_reason == "Stop-Loss-Serie":
             self.locked_until, self.lock_reason = 0, ""

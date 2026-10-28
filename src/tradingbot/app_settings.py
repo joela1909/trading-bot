@@ -81,6 +81,8 @@ class ProtectionsUpdate(_Strict):
     cooldown_candles: int | None = Field(default=None, ge=0, le=1000)
     # Bilanz-Filter: die letzten so vielen Trades derselben Regel muessen im Schnitt im Plus sein (0 = aus)
     track_record_trades: int | None = Field(default=None, ge=0, le=50)
+    # Drawdown-Grenze: so viel Prozent unter dem Hoch sperrt alle Einstiege fuer 4 Stunden (0 = aus)
+    max_drawdown_pct: float | None = Field(default=None, ge=0, le=100)
 
 
 class FuturesUpdate(_Strict):
@@ -193,6 +195,7 @@ def current(settings: Settings, has_override: bool | None = None, market: str = 
                 "lock_candles": b.protections.stoploss_guard_lock_candles,
                 "cooldown_candles": b.protections.cooldown_candles,
                 "track_record_trades": b.protections.track_record_trades,
+                "max_drawdown_pct": b.protections.max_drawdown_pct,
             },
             "daytrading": {
                 "enabled": b.daytrading.enabled,
@@ -233,7 +236,7 @@ def validate_and_save(settings: Settings, base_config: dict, payload: dict, mark
     if override.get("protections") is None:
         override.pop("protections", None)
     else:
-        for key in ("cooldown_candles", "track_record_trades"):
+        for key in ("cooldown_candles", "track_record_trades", "max_drawdown_pct"):
             if override["protections"].get(key) is None:
                 override["protections"].pop(key, None)
     if override.get("futures") is None:

@@ -140,7 +140,7 @@ class ProtectionConfig(BaseModel):
     stoploss_guard_stops: int = Field(default=3, ge=0)
     stoploss_guard_window_candles: int = Field(default=24, ge=1)
     stoploss_guard_lock_candles: int = Field(default=12, ge=1)
-    max_drawdown_pct: float = Field(default=20.0, ge=0)
+    max_drawdown_pct: float = Field(default=20.0, ge=0, le=100)  # 0 = aus
     max_drawdown_lock_candles: int = Field(default=48, ge=1)  # Dauer der Sperre in Minuten (Name aus Kompatibilitaet)
     # Bilanz-Filter: vor jedem Einstieg spielt der Bot dieselbe Strategie auf den letzten `track_record_bars` Kerzen
     # dieses Paars nach (wie die Time Machine). Haben ihre letzten `track_record_trades` Trades im Schnitt verloren,

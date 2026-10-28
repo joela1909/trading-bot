@@ -119,3 +119,16 @@ def test_drawdown_lock_lasts_minutes_on_every_timeframe():
     old = Protections(cfg, 900_000)
     old.load({"locked_until": 5_000 + 240 * 900_000, "lock_reason": "Drawdown-Grenze"})
     assert old.locked_until == 5_000 + 240 * 60_000, "alte, zu lange Sperre wird gekuerzt"
+
+
+
+def test_drawdown_off_lifts_running_lock():
+    from tradingbot.config import ProtectionConfig
+    from tradingbot.protections import Protections
+
+    p = Protections(ProtectionConfig(max_drawdown_pct=0), 60_000)
+    p.load({"locked_until": 10**13, "lock_reason": "Drawdown-Grenze", "peak": 1000.0})
+    assert p.locked_until == 0 and p.peak is None and p.entry_allowed("A", 10**12)[0]
+    p.update_equity(1000.0, 0)
+    p.update_equity(1.0, 1)
+    assert p.entry_allowed("A", 2)[0], "aus: nie sperren"
