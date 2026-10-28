@@ -147,6 +147,10 @@ class ProtectionConfig(BaseModel):
     # steigt er nicht ein (0 = aus). Weniger Trades in der Vorgeschichte: Einstieg erlaubt.
     track_record_trades: int = Field(default=0, ge=0, le=50)
     track_record_bars: int = Field(default=4320, ge=100, le=50000)
+    # ueber alle Zeitrahmen-Konten: hoechstens so viele offene Positionen in dieselbe Richtung (0 = aus); ein Paar nur
+    # einmal offen; nach einem Stop im selben Paar so viele Minuten kein Einstieg in dieselbe Richtung (0 = aus)
+    max_same_direction: int = Field(default=3, ge=0, le=50)
+    reentry_block_minutes: int = Field(default=60, ge=0, le=1440)
 
 
 class ExecutionConfig(BaseModel):
@@ -177,6 +181,11 @@ class AiConfig(BaseModel):
     gate_volume_min: float = Field(default=3.0, ge=0.0, le=20.0)  # Setup nur bei so viel Volumen wie der Schnitt (x-fach)
     position_check_every: int = Field(default=5, ge=1, le=100)  # offene Position: KI nur jede n-te Kerze fragen
     memory_trades: int = Field(default=8, ge=0, le=50)  # so viele eigene Trades bekommt die KI mit (Lernen aus Fehlern)
+    # Fehleranalyse: nach je reflect_every neuen Trades (alle Zeitrahmen) wertet die KI ihre letzten reflect_trades
+    # Trades aus und schreibt hoechstens max_lessons Regeln, die danach in jeder Anfrage stehen (0 = aus)
+    reflect_every: int = Field(default=5, ge=0, le=100)
+    reflect_trades: int = Field(default=40, ge=5, le=200)
+    max_lessons: int = Field(default=6, ge=1, le=12)
 
 
 class AiBotConfig(BaseModel):

@@ -903,8 +903,38 @@
   }
 
   // ------------------------------------------------------------ Strategien
+  function renderLessons(L) {
+    var box = clear($('lessons'));
+    if (!L) return;
+    box.appendChild(el('h2', 'group-title', 'Fehleranalyse der KI'));
+    var card = el('div', 'card');
+    if (!L.at) {
+      card.appendChild(el('p', 'footnote', 'Noch keine Analyse. Die KI wertet ihre Trades aus, sobald ' + L.next_in + ' weitere abgeschlossen sind.'));
+      box.appendChild(card);
+      return;
+    }
+    if (L.summary) card.appendChild(el('p', '', L.summary));
+    var list = el('div', 'list');
+    (L.lessons || []).forEach(function (x) {
+      var r = el('div', 'row');
+      r.appendChild(el('span', 'row-main', x));
+      list.appendChild(r);
+    });
+    card.appendChild(list);
+    card.appendChild(el('p', 'footnote', 'Aus ' + (L.trades_seen || 0) + ' Trades · ' + clock(L.at) + ' · nächste Analyse nach '
+      + L.next_in + ' weiteren Trades. Die Regeln stehen in jeder Anfrage an die KI.'));
+    box.appendChild(card);
+    if ((L.facts || []).length) {
+      box.appendChild(el('h2', 'group-title', 'Kennzahlen dazu'));
+      var f = el('div', 'list');
+      L.facts.forEach(function (x) { var r = el('div', 'row'); r.appendChild(el('span', 'row-main', x)); f.appendChild(r); });
+      box.appendChild(f);
+    }
+  }
+
   function renderStrategies() {
     var s = snap;
+    renderLessons(s.lessons);
     var withVotes = (s.market || []).filter(function (v) { return v.votes; });
     var first = (s.market || [])[0];
     var ref = $('referee');

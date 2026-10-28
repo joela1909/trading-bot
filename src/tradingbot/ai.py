@@ -181,6 +181,7 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
         if tr:
             stats.append(f"Trend {label}: {tr}")
     memory = context.get("recent_trades") or []
+    lessons = context.get("lessons") or []
     liq = context.get("liquidity") or []
 
     return (
@@ -191,6 +192,8 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
         + ("Liquiditaet:\n" + "\n".join(f"- {s}" for s in liq) + "\n\n" if liq else "")
         + (f"Vorauswahl hat ein Setup gefunden: {context['setup']}. Pruefe, ob es ein guter Trade ist; sonst hold.\n\n"
            if context.get("setup") else "")
+        + ("Deine Regeln aus der Fehleranalyse deiner bisherigen Trades (halte dich daran):\n"
+           + "\n".join(f"- {s}" for s in lessons) + "\n\n" if lessons else "")
         + ("Deine letzten abgeschlossenen Trades (lerne daraus: was hat funktioniert, was nicht?):\n"
            + "\n".join(f"- {s}" for s in memory) + "\n\n" if memory else "")
         + f"Letzte {len(rows)} Kerzen (UTC, open,high,low,close,volume), die letzte ist die neueste:\n" + "\n".join(rows) + "\n\n"
@@ -283,6 +286,26 @@ class ClaudeAdvisor:
             log.error("Anthropic-API-Fehler %s: %s", exc.status_code, exc.message)
             return AiDecision("hold", 0.0, f"KI-Fehler {exc.status_code}", ok=False)
         return self.parse(response)
+
+    def complete_text(self, system: str, user: str) -> str:
+        """Freie Textantwort (z. B. fuer die Fehleranalyse); zaehlt als KI-Aufruf, bei 429 das Ersatzmodell."""
+        self._roll_day()
+        if self.calls >= self.cfg.max_calls_per_day:
+            raise RuntimeError("Tageslimit der KI-Aufrufe erreicht")
+        self.calls += 1
+        if isinstance(self.client, (WorkersAiClient, OpenRouterClient)):
+            client = self.backup if self.backup is not None and self.limited_day == self.day else self.client
+            try:
+                out = client.complete(system, user)
+            except Exception as exc:  # noqa: BLE001
+                if "429" not in str(exc) or self.backup is None or client is self.backup:
+                    raise
+                self.limited_day = self.day
+                out = self.backup.complete(system, user)
+            return json.dumps(out) if isinstance(out, dict) else str(out or "")
+        response = self.client.messages.create(model=self.cfg.model, max_tokens=self.cfg.max_tokens, system=system,
+                                               messages=[{"role": "user", "content": user}])
+        return next((b.text for b in response.content if getattr(b, "type", None) == "text"), "")
 
     def ask_backup(self, user_prompt: str) -> AiDecision:
         try:

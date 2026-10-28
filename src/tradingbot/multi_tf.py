@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import logging
 import threading
+from pathlib import Path
 from bisect import bisect_right
 from datetime import datetime
 from typing import Callable
@@ -87,6 +88,42 @@ class MultiBot:
 
     def all_bots(self) -> list[TradingBot]:
         return list(self.bots.values())
+
+    def all_trades(self) -> list:
+        """Abgeschlossene Trades aller Zeitrahmen als (Trade, Zeitrahmen), aelteste zuerst."""
+        out = [(t, tf) for tf, b in self.bots.items() for t in b.state.trades]
+        return sorted(out, key=lambda x: x[0].closed_at)
+
+    def ai_decisions(self) -> list[dict]:
+        out = []
+        for b in self.all_bots():
+            adv = getattr(b.strategy, "advisor", None)
+            if adv is not None:
+                out += list(adv.decisions)
+        return out
+
+    def enable_learning(self) -> None:
+        """Nur fuer die KI-Strategie: gemeinsames Gedaechtnis, Fehleranalyse und Schutz ueber alle Konten."""
+        from .reflection import PortfolioGuard, Reflector, chain_guards
+
+        p = self.primary
+        if not getattr(p.strategy, "live_only", False):
+            return
+        ai = p.cfg.ai
+        guard = PortfolioGuard(self.all_bots, p.cfg.protections.max_same_direction, p.cfg.protections.reentry_block_minutes)
+        self.reflector = Reflector(p.strategy.advisor.complete_text, self.all_trades, self.ai_decisions,
+                                   Path(p.state_path).with_name("ai_lessons.json"), ai.reflect_every, ai.reflect_trades, ai.max_lessons)
+        before = p.before_cycle
+
+        def cycle():
+            if before is not None:
+                before()
+            self.reflector.maybe_start()
+        p.before_cycle = cycle
+        for b in self.all_bots():
+            b.trade_memory = self.all_trades
+            b.lessons = lambda: self.reflector.lessons
+            b.entry_guard = chain_guards(b.entry_guard, guard)
 
     def open_symbols(self) -> set[str]:
         return {s for b in self.all_bots() for s in b.state.positions}
@@ -192,6 +229,7 @@ class MultiBot:
             equity_history=downsample(merged),
             market_by_timeframe={tf: s.get("market", []) for tf, s in snaps.items()},
             timeframes=self.timeframes,
+            lessons=self.reflector.snapshot() if getattr(self, "reflector", None) else None,
             accounts=[{"timeframe": tf, "equity": s.get("equity"), "return_pct": s.get("return_pct"),
                        "positions": len(s.get("positions", [])), "trades": len(self.bots[tf].state.trades),
                        "last_cycle": s.get("last_cycle")} for tf, s in snaps.items()],

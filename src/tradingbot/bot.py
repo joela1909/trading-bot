@@ -69,6 +69,9 @@ class TradingBot:
         self._track_cache: dict[str, tuple[int, list[float]]] = {}
         # Zusatzwissen fuer die Strategie je Paar, z. B. Liquiditaet fuer die KI: (Paar, Kerzen) -> Liste von Saetzen
         self.context_extra = None
+        # Gedaechtnis ueber alle Zeitrahmen (MultiBot): () -> [(Trade, Zeitrahmen)], und Lehren der Fehleranalyse
+        self.trade_memory = None
+        self.lessons = None
         # wird zu Beginn jeder Runde aufgerufen, z. B. um die Aktienliste des Tages zu erneuern
         self.before_cycle = None
         # Echtzeit: (Kerze, Richtung) des letzten Ausstiegs je Paar, "any" nach einem Einstieg
@@ -143,6 +146,7 @@ class TradingBot:
             "liquidity": self._extra(symbol),
             "cost_pct": 2.0 * (self.cfg.paper.fee_pct + self.cfg.paper.slippage_pct),
             "recent_trades": self._recent_trades(symbol),
+            "lessons": self.lessons() if self.lessons is not None and getattr(self.strategy, "live_only", False) else [],
         }
 
     def _recent_trades(self, symbol: str) -> list[str]:
@@ -150,14 +154,16 @@ class TradingBot:
         n = getattr(getattr(self.cfg, "ai", None), "memory_trades", 0)
         if not n or not getattr(self.strategy, "live_only", False):
             return []
-        trades = [t for t in self.state.trades if t.symbol == symbol][-n // 2:] or []
+        # mit MultiBot die Trades aller Zeitrahmen (ein 4h-Stop ist auch fuer 1m eine Lehre), sonst die eigenen
+        pool = self.trade_memory() if self.trade_memory is not None else [(t, "") for t in self.state.trades]
+        trades = [x for x in pool if x[0].symbol == symbol][-n // 2:] or []
         rest = n - len(trades)
         if rest > 0:
-            trades += [t for t in self.state.trades if t.symbol != symbol][-rest:]
+            trades += [x for x in pool if x[0].symbol != symbol][-rest:]
         out = []
-        for t in sorted(trades, key=lambda x: x.closed_at)[-n:]:
+        for t, tf in sorted(trades, key=lambda x: x[0].closed_at)[-n:]:
             mins = (parse_iso(t.closed_at) - parse_iso(t.opened_at)).total_seconds() / 60
-            out.append(f"{t.symbol.split('/')[0]} {t.side} {t.opened_at[5:16]}: Einstieg {t.entry_price:.6g}, Ausstieg {t.exit_price:.6g}, "
+            out.append(f"{tf + ' ' if tf else ''}{t.symbol.split('/')[0]} {t.side} {t.opened_at[5:16]}: Einstieg {t.entry_price:.6g}, Ausstieg {t.exit_price:.6g}, "
                        f"{t.pnl_pct:+.2f} % nach Kosten, {mins:.0f} min, Grund: {t.reason[:60]}")
         return out
 

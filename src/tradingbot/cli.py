@@ -228,6 +228,7 @@ def cmd_run(args: argparse.Namespace) -> int:
 
         # mehrere Zeitrahmen gleichzeitig, je eigener Bot mit eigenem Papierkonto
         bot = MultiBot.build(settings, settings.bot.timeframes, build_bot)
+        bot.enable_learning()
         log.info("Krypto handelt auf %s", ", ".join(bot.timeframes))
     else:
         bot = build_bot(settings)
