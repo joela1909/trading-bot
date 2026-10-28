@@ -109,7 +109,7 @@ protections:
   stoploss_guard_window_candles: 60 # ... innerhalb von 60 Minuten ...
   stoploss_guard_lock_candles: 60   # ... sperren alle Einstiege fuer 60 Minuten
   max_drawdown_pct: 20.0
-  max_drawdown_lock_candles: 240    # 4 Stunden Sperre nach zu grossem Drawdown
+  max_drawdown_lock_candles: 240    # 4 Stunden Sperre nach zu grossem Drawdown (in Minuten, gilt fuer jeden Zeitrahmen)
   track_record_trades: 3     # Bilanz-Filter: letzte 3 Trades derselben Regel auf dem Paar im Schnitt im Plus, sonst kein Einstieg (0 = aus)
   track_record_bars: 4320    # ... nachgespielt ueber die letzten 3 Tage (1m-Kerzen); Test 60 Tage: Verlust -33 % -> -7 %
 

@@ -41,7 +41,8 @@ class Protections:
             self.peak = equity
         limit = self.cfg.max_drawdown_pct
         if limit > 0 and self.peak and (self.peak - equity) / self.peak * 100.0 >= limit and ts_ms >= self.locked_until:
-            self._lock(ts_ms + self.cfg.max_drawdown_lock_candles * self.tf, "Drawdown-Grenze")
+            # Dauer in Minuten (wie 1m-Kerzen), damit 240 auf jedem Zeitrahmen 4 Stunden sind und nicht 40 Tage auf 4h
+            self._lock(ts_ms + self.cfg.max_drawdown_lock_candles * 60_000, "Drawdown-Grenze")
             self.peak = equity
 
     def entry_allowed(self, symbol: str, ts_ms: int) -> tuple[bool, str]:
@@ -67,6 +68,10 @@ class Protections:
         self.peak = d.get("peak")
         self.locked_until = int(d.get("locked_until", 0))
         self.lock_reason = d.get("lock_reason", "")
+        # Drawdown-Sperre von frueher in Kerzen des Zeitrahmens gesetzt: auf die Dauer in Minuten kuerzen
+        if self.lock_reason == "Drawdown-Grenze" and self.tf > 60_000:
+            started = self.locked_until - self.cfg.max_drawdown_lock_candles * self.tf
+            self.locked_until = min(self.locked_until, started + self.cfg.max_drawdown_lock_candles * 60_000)
         # Sperre nach Stop-Loss-Serie abgeschaltet: eine noch laufende Sperre dieser Art sofort aufheben
         if self.cfg.stoploss_guard_stops <= 0 and self.lock_reason == "Stop-Loss-Serie":
             self.locked_until, self.lock_reason = 0, ""

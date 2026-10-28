@@ -48,7 +48,7 @@ def test_exchange_stop_counts_as_stop_loss():
 
 
 def test_drawdown_lock_and_peak_reset():
-    p = _prot(cooldown_candles=0, stoploss_guard_stops=0, max_drawdown_pct=10, max_drawdown_lock_candles=4)
+    p = _prot(cooldown_candles=0, stoploss_guard_stops=0, max_drawdown_pct=10, max_drawdown_lock_candles=240)  # 4 Stunden
     p.update_equity(1000, 0)
     p.update_equity(950, 1 * H)
     assert p.entry_allowed("A", 1 * H)[0]
@@ -104,3 +104,18 @@ def test_bot_respects_cooldown_after_exit(settings, tmp_path):
     assert not bot.state.positions, "Abkuehlphase muss den Wiedereinstieg verhindern"
     reloaded = BotState.load(tmp_path / "state.json")
     assert "BTC/USDT" in reloaded.protections["last_exit"]
+
+
+
+def test_drawdown_lock_lasts_minutes_on_every_timeframe():
+    from tradingbot.config import ProtectionConfig
+    from tradingbot.protections import Protections
+
+    cfg = ProtectionConfig(max_drawdown_pct=20.0, max_drawdown_lock_candles=240)
+    p = Protections(cfg, 4 * 3_600_000)  # 4h-Kerzen
+    p.update_equity(1000.0, 0)
+    p.update_equity(790.0, 1000)
+    assert p.locked_until == 1000 + 240 * 60_000, "4 Stunden, nicht 240 x 4 Stunden"
+    old = Protections(cfg, 900_000)
+    old.load({"locked_until": 5_000 + 240 * 900_000, "lock_reason": "Drawdown-Grenze"})
+    assert old.locked_until == 5_000 + 240 * 60_000, "alte, zu lange Sperre wird gekuerzt"
