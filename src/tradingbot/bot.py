@@ -141,7 +141,25 @@ class TradingBot:
             "timeframe": self.cfg.timeframe,
             "open_positions": len(self.state.positions),
             "liquidity": self._extra(symbol),
+            "cost_pct": 2.0 * (self.cfg.paper.fee_pct + self.cfg.paper.slippage_pct),
+            "recent_trades": self._recent_trades(symbol),
         }
+
+    def _recent_trades(self, symbol: str) -> list[str]:
+        """Die letzten eigenen Trades als kurze Saetze (fuer die KI): dieses Paar zuerst, dann die uebrigen."""
+        n = getattr(getattr(self.cfg, "ai", None), "memory_trades", 0)
+        if not n or not getattr(self.strategy, "live_only", False):
+            return []
+        trades = [t for t in self.state.trades if t.symbol == symbol][-n // 2:] or []
+        rest = n - len(trades)
+        if rest > 0:
+            trades += [t for t in self.state.trades if t.symbol != symbol][-rest:]
+        out = []
+        for t in sorted(trades, key=lambda x: x.closed_at)[-n:]:
+            mins = (parse_iso(t.closed_at) - parse_iso(t.opened_at)).total_seconds() / 60
+            out.append(f"{t.symbol.split('/')[0]} {t.side} {t.opened_at[5:16]}: Einstieg {t.entry_price:.6g}, Ausstieg {t.exit_price:.6g}, "
+                       f"{t.pnl_pct:+.2f} % nach Kosten, {mins:.0f} min, Grund: {t.reason[:60]}")
+        return out
 
     def _extra(self, symbol: str) -> list[str]:
         if self.context_extra is None:
@@ -326,7 +344,7 @@ class TradingBot:
         """Bilanz-Filter: dieselbe Strategie auf den Kerzen vor dem Signal nachspielen (Backtest mit den aktuellen
         Einstellungen) und die letzten K Trades ansehen. Ergebnis je Paar und Kerze zwischengespeichert."""
         k = self.cfg.protections.track_record_trades
-        if k <= 0:
+        if k <= 0 or getattr(self.strategy, "live_only", False):  # KI laesst sich nicht nachspielen
             return True, ""
         last_ts = int(df["timestamp"].iloc[-1])
         hit = self._track_cache.get(symbol)
@@ -529,7 +547,7 @@ class TradingBot:
         import pandas as pd
 
         need = self.strategy.warmup_bars + 10
-        if self.cfg.protections.track_record_trades > 0:
+        if self.cfg.protections.track_record_trades > 0 and not getattr(self.strategy, "live_only", False):
             # Vorgeschichte fuer den Bilanz-Filter: track_record_bars gilt fuer 1m-Kerzen, groessere entsprechend weniger
             need += max(200, self.cfg.protections.track_record_bars * 60 // timeframe_seconds(self.cfg.timeframe))
         tf = self.cfg.timeframe
@@ -574,7 +592,8 @@ class TradingBot:
         if raw.empty:
             log.warning("%s: keine Kerzen erhalten", symbol)
             return
-        realtime = self.cfg.strategy.realtime_signals
+        # KI-Strategien fragen das Modell bei jeder Neuberechnung: nur bei Kerzenschluss, nie in Echtzeit
+        realtime = self.cfg.strategy.realtime_signals and not getattr(self.strategy, "live_only", False)
         if realtime:
             # Echtzeit: die laufende Kerze rechnet mit. Neu gerechnet wird bei jedem Kerzenschluss und dazwischen
             # hoechstens alle Zehntel-Kerze (1m: 6 s, 15m: 90 s, 1h: 6 min); das spart viel Rechenzeit.

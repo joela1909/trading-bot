@@ -79,7 +79,8 @@ def build_bot(settings: Settings, suffix: str = "") -> TradingBot:
         settings=settings,
         feed=feed,
         broker=broker,
-        strategy=build_strategy(cfg.strategy, ai=cfg.ai, api_key=sec.anthropic_api_key, session=cfg.session_cfg, timeframe=cfg.timeframe),
+        strategy=build_strategy(cfg.strategy, ai=cfg.ai, session=cfg.session_cfg, timeframe=cfg.timeframe,
+                                api_key=sec.openrouter_api_key if cfg.ai.provider == "openrouter" else sec.anthropic_api_key),
         risk=RiskManager(cfg.risk),
         state=BotState.load(state_path),
         notifier=notifier,
@@ -90,6 +91,10 @@ def build_bot(settings: Settings, suffix: str = "") -> TradingBot:
         # Signale und Chart aus Spot-Kursen (wie der TradingView-Chart auf dem Spot-Paar), gehandelt auf cfg.market
         bot.signal_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot")
     bot.chart_feed = CcxtDataFeed.shared(cfg.exchange, market_type="spot" if spot_signals else cfg.market)
+    if cfg.strategy.name == "claude_advisor" and cfg.is_futures:
+        from .insights import LiquidityContext
+
+        bot.context_extra = LiquidityContext(feed.exchange)  # Orderbuch, Funding, OI, Liquiditaetszonen fuer die KI
     if cfg.scanner_top > 0 and cfg.is_futures:
         from .insights import CryptoScanner
 

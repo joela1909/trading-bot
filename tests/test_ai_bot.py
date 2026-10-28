@@ -126,3 +126,26 @@ def test_workers_ai_reads_both_answer_formats():
     for data in ({"result": {"response": '{"action":"hold"}'}},
                  {"result": {"choices": [{"message": {"content": '{"action":"hold"}'}}]}}):
         assert WorkersAiClient(cfg, url="http://ai/", session=FakeSession(data)).complete("s", "u") == '{"action":"hold"}'
+
+
+def test_gate_asks_ai_only_on_setups_and_memory_in_prompt():
+    from tradingbot.ai import build_user_prompt
+
+    calls = []
+    s = ClaudeAdvisorStrategy(StrategyConfig(name="claude_advisor", allow_short=True), AiConfig(gate_lookback=20, gate_volume_min=2.0),
+                              client=object(), timeframe="1m")
+    s.advisor.ask = lambda p: calls.append(p) or AiDecision("hold", 0.5, "ok")
+    df = make_ohlcv(trend_closes())
+    df["timestamp"] = [1_790_000_000_000 + i * 60_000 for i in range(len(df))]
+    p = s.prepare(df)
+    assert s.gated and s.warmup_bars >= 3300
+    p.loc[p.index[-1], "volume"] = 0.0  # kein Volumen: kein Setup
+    assert "Vorauswahl" in s.decide(p, context={"symbol": "BTC", "position": None}).reason and not calls
+    q = p.copy()
+    lo = float(q["low"].iloc[-21:-1].min())
+    q.loc[q.index[-1], ["low", "close", "volume"]] = [lo * 0.99, lo * 1.001, float(q["volume"].iloc[-21:-1].mean()) * 5]
+    assert s.setup(q)[1] == "long"
+    s.decide(q, context={"symbol": "BTC", "position": None, "recent_trades": ["BTC long: -0,50 % Stop"]})
+    assert calls and "Liquiditaets-Sweep" in calls[0] and "Deine letzten abgeschlossenen Trades" in calls[0]
+    text = build_user_prompt("BTC", "1m", "USDT", p, {"cost_pct": 0.22}, 30)
+    assert "Ziel mindestens 0.66 %" in text

@@ -38,7 +38,7 @@ def build_strategy(
     timeframe: str | None = None,
 ) -> Strategy:
     if cfg.name in LIVE_ONLY:
-        strategy = ClaudeAdvisorStrategy(cfg, ai or AiConfig(), api_key=api_key, client=client)
+        strategy = ClaudeAdvisorStrategy(cfg, ai or AiConfig(), api_key=api_key, client=client, timeframe=timeframe)
         if session is not None:
             strategy.session = session
         return strategy

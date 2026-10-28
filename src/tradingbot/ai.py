@@ -61,7 +61,9 @@ Regeln des Systems, die du nicht aendern kannst:
 - Bei offener Position darfst du mit action hold neue Werte setzen: den Stop nur naeher an den Kurs (nie weiter weg), das Ziel frei.
   Willst du nichts aendern, setze beide auf null.
 - Jeder Handel kostet Gebuehren und Kursabweichung, zusammen etwa 0,2 Prozent. Steige nur bei einer klaren Lage ein. Halten ist der Normalfall.
-- Handle bevorzugt mit dem Trend (z. B. Kurs ueber beiden EMAs und EMAs steigend: eher Long; darunter und fallend: eher Short). In Seitwaertsphasen: hold.
+- Handle mit dem Trend des groesseren Zeitrahmens (Trend 15m/1h in den Kennzahlen). Gegen ihn nur nach einem klaren Liquiditaets-Sweep mit Umkehr. In Seitwaertsphasen: hold.
+- Das Ziel muss mindestens dreimal so weit entfernt sein wie die Kosten je Trade (in den Kennzahlen). Kleinere Bewegungen lohnen nicht.
+- Lerne aus deinen letzten Trades: wiederhole keine Muster, die zuletzt mehrfach im Stop endeten.
 - Ein offener Trade hat einen Stop-Loss im Bot. Schliesse aktiv nur, wenn die Lage sich erkennbar gegen die Position gedreht hat.
 - confidence ist deine ehrliche Wahrscheinlichkeit zwischen 0 und 1, dass die Entscheidung sich lohnt. Der Bot ignoriert Entscheidungen unter seiner Schwelle.
 - Nutze ausschliesslich die gelieferten Zahlen. Du kennst keine Nachrichten und keine Zukunft.
@@ -110,6 +112,22 @@ def _fmt(x: float) -> str:
     return f"{x:.6g}"
 
 
+def _htf_trend(df: pd.DataFrame, minutes: int) -> str:
+    """Trend eines groesseren Zeitrahmens aus den Bot-Kerzen: EMA 20 gegen EMA 50 und Aenderung der letzten 10 Kerzen."""
+    if "timestamp" not in df.columns or len(df) < 3:
+        return ""
+    step = int(df["timestamp"].iloc[-1] - df["timestamp"].iloc[-2])
+    if step <= 0 or step >= minutes * 60_000:
+        return ""
+    t = pd.to_datetime(df["timestamp"], unit="ms")
+    c = df.set_index(t)["close"].resample(f"{minutes}min").last().dropna()
+    if len(c) < 55:
+        return ""
+    e20, e50 = c.ewm(span=20, adjust=False).mean(), c.ewm(span=50, adjust=False).mean()
+    d = "aufwaerts" if e20.iloc[-1] > e50.iloc[-1] else "abwaerts"
+    return f"{d} (EMA20 {'ueber' if d == 'aufwaerts' else 'unter'} EMA50), letzte 10 Kerzen {(c.iloc[-1] / c.iloc[-11] - 1) * 100:+.2f} %"
+
+
 def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame, context: dict, candles: int) -> str:
     last = df.iloc[-1]
     close = float(last["close"])
@@ -155,6 +173,14 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
     if context.get("free_quote") is not None:
         account.append(f"frei {context['free_quote']:.2f} {quote}")
     account.append(f"offene Positionen insgesamt {context.get('open_positions', 0)}")
+    if context.get("cost_pct"):
+        cost = float(context["cost_pct"])
+        stats.append(f"Kosten je Trade hin und zurueck: {cost:.2f} % (Gebuehren + Kursabweichung). Ziel mindestens {3 * cost:.2f} % entfernt")
+    for label, minutes in (("15m", 15), ("1h", 60)):
+        tr = _htf_trend(df, minutes)
+        if tr:
+            stats.append(f"Trend {label}: {tr}")
+    memory = context.get("recent_trades") or []
     liq = context.get("liquidity") or []
 
     return (
@@ -163,6 +189,10 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
         f"Konto: {', '.join(account)}\n\n"
         "Kennzahlen:\n" + "\n".join(f"- {s}" for s in stats) + "\n\n"
         + ("Liquiditaet:\n" + "\n".join(f"- {s}" for s in liq) + "\n\n" if liq else "")
+        + (f"Vorauswahl hat ein Setup gefunden: {context['setup']}. Pruefe, ob es ein guter Trade ist; sonst hold.\n\n"
+           if context.get("setup") else "")
+        + ("Deine letzten abgeschlossenen Trades (lerne daraus: was hat funktioniert, was nicht?):\n"
+           + "\n".join(f"- {s}" for s in memory) + "\n\n" if memory else "")
         + f"Letzte {len(rows)} Kerzen (UTC, open,high,low,close,volume), die letzte ist die neueste:\n" + "\n".join(rows) + "\n\n"
         "Entscheide jetzt."
     )
@@ -316,7 +346,7 @@ class WorkersAiClient:
         body = {
             "model": self.cfg.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": 600,
+            "max_tokens": 3000,  # Denkmodelle brauchen Platz fuer Ueberlegungen vor der Antwort
             "response_format": {"type": "json_schema", "json_schema": DECISION_SCHEMA},
         }
         r = self.http.post(self.url, json=body, timeout=self.cfg.timeout_seconds)

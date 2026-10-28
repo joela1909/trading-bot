@@ -170,6 +170,13 @@ class AiConfig(BaseModel):
     candles_in_prompt: int = Field(default=48, ge=10, le=300)
     timeout_seconds: float = Field(default=90.0, ge=5.0)
     max_tokens: int = Field(default=16000, ge=2000)
+    # Vorauswahl: auf diesen Zeitrahmen fragt der Bot die KI nur, wenn ein Setup auftaucht (Liquiditaets-Sweep mit
+    # Umkehr oder Ausbruch mit Volumen); spart auf 1m ueber 95 % der Abfragen
+    gate_timeframes: list[str] = Field(default_factory=lambda: ["1m", "5m"])
+    gate_lookback: int = Field(default=240, ge=10, le=2000)  # Kerzen fuer Hoch/Tief der Liquiditaetszone
+    gate_volume_min: float = Field(default=3.0, ge=0.0, le=20.0)  # Setup nur bei so viel Volumen wie der Schnitt (x-fach)
+    position_check_every: int = Field(default=5, ge=1, le=100)  # offene Position: KI nur jede n-te Kerze fragen
+    memory_trades: int = Field(default=8, ge=0, le=50)  # so viele eigene Trades bekommt die KI mit (Lernen aus Fehlern)
 
 
 class AiBotConfig(BaseModel):
@@ -368,8 +375,11 @@ class Settings(BaseModel):
                 "Futures (und damit Short-Positionen) sind bisher nur im Papierhandel freigegeben. "
                 "Die Live-Anbindung fuer Futures ist noch nicht gegen eine echte Boerse getestet."
             )
-        if self.bot.strategy.name == "claude_advisor" and not self.secrets.anthropic_api_key:
-            raise RuntimeError("Die Strategie claude_advisor braucht ANTHROPIC_API_KEY in .env (Zugang zur Anthropic-API).")
+        if self.bot.strategy.name == "claude_advisor":
+            if self.bot.ai.provider == "anthropic" and not self.secrets.anthropic_api_key:
+                raise RuntimeError("Die Strategie claude_advisor braucht ANTHROPIC_API_KEY in .env (Zugang zur Anthropic-API).")
+            if self.bot.ai.provider == "openrouter" and not self.secrets.openrouter_api_key:
+                raise RuntimeError("Die KI ueber OpenRouter braucht OPENROUTER_API_KEY (Secret bzw. .env).")
         for symbol in self.bot.symbols:
             if "/" not in symbol or symbol.split("/")[1].split(":")[0] != self.bot.quote_currency:
                 raise RuntimeError(

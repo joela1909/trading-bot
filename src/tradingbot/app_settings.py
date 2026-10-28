@@ -145,7 +145,7 @@ def merge(base: dict, override: dict) -> dict:
 
 def current(settings: Settings, has_override: bool | None = None, market: str = "crypto") -> dict:
     """Aktuelle Werte und Auswahlmoeglichkeiten fuer die Einstellungsseite, je Markt (crypto | stocks)."""
-    from .strategy import REGISTRY
+    from .strategy import LIVE_ONLY, REGISTRY
 
     stocks = market == "stocks"
     if has_override is None:
@@ -204,7 +204,7 @@ def current(settings: Settings, has_override: bool | None = None, market: str = 
         },
         "options": {
             "timeframes": list(TIMEFRAMES),
-            "strategies": sorted(n for n, c in REGISTRY.items() if not c.backtest_only),
+            "strategies": sorted([n for n, c in REGISTRY.items() if not c.backtest_only] + list(LIVE_ONLY)),
             "members": sorted(n for n, c in REGISTRY.items() if n != "ensemble" and not c.backtest_only),
             "own_exits": sorted(n for n, c in REGISTRY.items() if c.own_exits),
             "symbols": SUGGESTED_STOCKS if stocks else SUGGESTED_SYMBOLS,
@@ -284,7 +284,9 @@ def validate_and_save(settings: Settings, base_config: dict, payload: dict, mark
         raise ValueError(_first_error(exc)) from exc
     from .strategy import REGISTRY
 
-    if strat["name"] not in REGISTRY:
+    from .strategy import LIVE_ONLY
+
+    if strat["name"] not in REGISTRY and strat["name"] not in LIVE_ONLY:
         raise ValueError(f"Unbekannte Strategie '{strat['name']}'")
     solo = [strat["solo_member"]] if strat.get("solo_member") else []
     unknown = [m for m in (strat.get("members") or []) + solo if m not in REGISTRY or m == "ensemble"]

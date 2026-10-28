@@ -22,20 +22,57 @@ class ClaudeAdvisorStrategy(Strategy):
 
     MIN_STOP_PCT, MAX_STOP_PCT = 0.15, 10.0  # Stop der KI nur in diesem Abstand vom Kurs, sonst gilt der eigene Plan
 
-    def __init__(self, cfg: StrategyConfig, ai: AiConfig, api_key: str = "", client=None):
-        super().__init__(cfg)
+    def __init__(self, cfg: StrategyConfig, ai: AiConfig, api_key: str = "", client=None, timeframe: str | None = None):
+        super().__init__(cfg, timeframe=timeframe)
         self.ai = ai
+        self.timeframe = timeframe or ""
+        self.gated = self.timeframe in ai.gate_timeframes  # Vorauswahl: KI nur bei Setups fragen
         self._levels: tuple[str, float | None, float | None] | None = None  # (Richtung, Stop, Ziel) der letzten KI-Antwort
         self.advisor = ClaudeAdvisor(ai, api_key=api_key, client=client, futures=cfg.allow_short)
 
     @property
     def warmup_bars(self) -> int:
-        return WARMUP_FACTOR * max(self.cfg.slow_ema, self.cfg.rsi_period, self.cfg.atr_period)
+        base = WARMUP_FACTOR * max(self.cfg.slow_ema, self.cfg.rsi_period, self.cfg.atr_period)
+        # fuer den Trend auf 15m und 1h: etwa 55 Stunden Vorgeschichte (1m: 3.300 Kerzen)
+        if self.timeframe_ms:
+            return max(base, 55 * 3_600_000 // self.timeframe_ms)
+        return base
+
+    def setup(self, df: pd.DataFrame) -> tuple[str, str] | None:
+        """Vorauswahl auf der letzten Kerze: (Beschreibung, Richtung) oder None.
+        Sweep: Docht holt das Hoch/Tief der letzten Kerzen ab, Schluss wieder innerhalb (Umkehr).
+        Ausbruch: Schluss jenseits des Hochs/Tiefs, in Richtung des 15m-Trends. Beides nur mit gate_volume_min-fachem Volumen."""
+        n = self.ai.gate_lookback
+        if len(df) < n + 2:
+            return None
+        last = df.iloc[-1]
+        look = df.iloc[-n - 1:-1]
+        hi, lo = float(look["high"].max()), float(look["low"].min())
+        vol = float(look["volume"].mean()) or 1.0
+        vr = float(last["volume"]) / vol
+        c = float(last["close"])
+        if vr < self.ai.gate_volume_min:
+            return None
+        trend = df["htf_trend"].iloc[-1] if "htf_trend" in df.columns else 0
+        if float(last["low"]) < lo and c > lo:
+            return f"Liquiditaets-Sweep unter dem {n}-Kerzen-Tief {lo:.6g} mit Schluss darueber (Volumen {vr:.1f}x)", "long"
+        if float(last["high"]) > hi and c < hi:
+            return f"Liquiditaets-Sweep ueber dem {n}-Kerzen-Hoch {hi:.6g} mit Schluss darunter (Volumen {vr:.1f}x)", "short"
+        if c > hi and trend >= 0:
+            return f"Ausbruch ueber das {n}-Kerzen-Hoch {hi:.6g} mit {vr:.1f}x Volumen, 15m-Trend aufwaerts", "long"
+        if c < lo and trend <= 0:
+            return f"Ausbruch unter das {n}-Kerzen-Tief {lo:.6g} mit {vr:.1f}x Volumen, 15m-Trend abwaerts", "short"
+        return None
 
     def _add_indicators(self, df: pd.DataFrame) -> None:
         df["ema_fast"] = ema(df["close"], self.cfg.fast_ema)
         df["ema_slow"] = ema(df["close"], self.cfg.slow_ema)
         df["rsi"] = rsi(df["close"], self.cfg.rsi_period)
+        # Trend des naechstgroesseren Zeitrahmens (15m-EMA 20 gegen 50) auf die Bot-Kerzen uebertragen: 1 auf, -1 ab
+        if self.timeframe_ms and self.timeframe_ms < 900_000 and "timestamp" in df.columns:
+            k = 900_000 // self.timeframe_ms
+            e20, e50 = ema(df["close"], 20 * k), ema(df["close"], 50 * k)
+            df["htf_trend"] = (e20 > e50).astype(int) - (e20 < e50).astype(int)
 
     def signals(self, df):
         raise NotImplementedError("claude_advisor ist nicht backtestbar, nur Papier- und Live-Handel")
@@ -49,6 +86,18 @@ class ClaudeAdvisorStrategy(Strategy):
             return Decision(Signal.HOLD, "Indikatoren noch im Warmup")
         symbol = context.get("symbol", "?")
         position = context.get("position")
+        if self.gated:
+            # Vorauswahl: ohne Setup keine Abfrage; offene Positionen nur jede n-te Kerze pruefen (Stop/Ziel laufen ja)
+            if position is None:
+                found = self.setup(df)
+                if found is None:
+                    return Decision(Signal.HOLD, "kein Setup (Vorauswahl), KI nicht gefragt", atr=atr_value)
+                context = {**context, "setup": found[0]}
+            else:
+                ts = int(df["timestamp"].iloc[-1]) if "timestamp" in df.columns else 0
+                if self.timeframe_ms and (ts // self.timeframe_ms) % self.ai.position_check_every:
+                    return Decision(Signal.HOLD, "Position laeuft, KI prueft jede "
+                                    f"{self.ai.position_check_every}. Kerze", atr=atr_value)
         prompt = build_user_prompt(symbol, context.get("timeframe", "?"), context.get("quote", ""), df, context, self.ai.candles_in_prompt)
         d: AiDecision = self.advisor.ask(prompt)
         self._levels = None

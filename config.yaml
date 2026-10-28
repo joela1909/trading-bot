@@ -19,12 +19,12 @@ quote_currency: USDT
 # Kerzen-Zeitrahmen fuer die Strategie (1m, 5m, 15m, 1h, 4h, 1d ...)
 # 1m: sehr viele kleine Bewegungen, die Gebuehren fressen einen grossen Teil jedes Gewinns.
 timeframe: 1m
-timeframes: [15m, 1h, 4h]   # mehr (5m, 1m) ist fuer den basic-Container zu viel; 1m wuerde den kleinen Container auslasten; handeln gleichzeitig, je eigener Bot mit eigenem Papierkonto (timeframe oben ist der Haupt-Zeitrahmen)
+timeframes: [1m, 15m, 1h, 4h]   # 1m mit KI-Vorauswahl (nur Setups werden gefragt); mehr (5m, 1m) ist fuer den basic-Container zu viel; 1m wuerde den kleinen Container auslasten; handeln gleichzeitig, je eigener Bot mit eigenem Papierkonto (timeframe oben ist der Haupt-Zeitrahmen)
 
 # Wie oft der Bot Kurse prueft (Stop-Loss/Take-Profit werden bei jedem Durchlauf geprueft,
 # Einstiegssignale nur bei einer neuen, abgeschlossenen Kerze)
 poll_interval_seconds: 5      # so oft prueft der Bot Kurse, Stops und Ziele (Kerzen werden zwischengespeichert)
-scanner_top: 5               # Krypto-Scanner: alle 6 Stunden die 5 meistgehandelten USDT-Perpetuals (24h-Umsatz) dazunehmen, 0 = aus
+scanner_top: 0               # aus, solange die KI handelt (jedes neue Paar kostet Abfragen); Krypto-Scanner: alle 6 Stunden die 5 meistgehandelten USDT-Perpetuals (24h-Umsatz) dazunehmen, 0 = aus
 news_minutes: 60              # News-Richtung: nur in die Richtung handeln, fuer die die Schlagzeilen der letzten 60 Minuten sprechen (Alpaca News), 0 = aus
 
 # Windows: Ruhemodus verhindern, solange der Bot laeuft (aendert keine Einstellung, endet mit dem Bot)
@@ -138,8 +138,23 @@ dashboard:
 # Kurse von Alpaca: kostenloses Papierkonto auf https://alpaca.markets (nur E-Mail), dort "Paper" -> API Keys erzeugen.
 # Schluessel in .env: ALPACA_API_KEY und ALPACA_API_SECRET (Cloudflare: npx wrangler secret put ALPACA_API_KEY ...).
 # Ohne Schluessel laeuft nur der Krypto-Bot. Gehandelt wird auf einem eigenen Papierkonto, Orders gehen nie raus.
-ai_bot:                      # KI-Konto: zweites Krypto-Papierkonto, ein Sprachmodell entscheidet Long/Short/Halten
-  enabled: true
+# KI fuer den Krypto-Bot (Strategie claude_advisor): Anbieter, Modell, Grenzen
+ai:
+  provider: openrouter       # openrouter (OPENROUTER_API_KEY) | workers_ai (Cloudflare, ohne Schluessel) | anthropic (ANTHROPIC_API_KEY)
+  model: "nvidia/nemotron-3-ultra-550b-a55b:free"
+  fallback_models: ["nvidia/nemotron-3.5-super-vl:free", "google/gemma-4-31b-it:free"]
+  backup_model: "@cf/google/gemma-4-26b-a4b-it"   # wenn OpenRouter sein Tageslimit meldet: Cloudflare Workers AI
+  max_calls_per_day: 1500    # je Zeitrahmen-Bot; 11 Paare auf 15m = 1.056 am Tag
+  min_confidence: 0.6
+  candles_in_prompt: 30
+  gate_timeframes: [1m, 5m, 15m]   # dort fragt der Bot die KI nur bei Setups (Sweep mit Umkehr, Ausbruch), 1h/4h jede Kerze
+  gate_lookback: 240         # Hoch/Tief der letzten 240 Kerzen als Liquiditaetszone (1m: 4 Stunden)
+  gate_volume_min: 3.0       # nur mit mindestens dreifachem Volumen: ca. 18 Setups je Paar und Tag auf 1m
+  position_check_every: 5    # offene Position auf diesen Zeitrahmen: KI jede 5. Kerze fragen
+  memory_trades: 8           # die KI sieht ihre letzten 8 Trades und soll daraus lernen
+
+ai_bot:                      # KI-Konto: zweites Krypto-Papierkonto (aus, seit der Krypto-Bot selbst per KI handelt)
+  enabled: false
   # openrouter: freie Modelle ueber openrouter.ai (OPENROUTER_API_KEY; 50 Abfragen/Tag, nach 10 $ Aufladung 1.000/Tag)
   # workers_ai: Cloudflare, ohne Schluessel (10.000 Neurons/Tag kostenlos, z. B. @cf/google/gemma-4-26b-a4b-it)
   # anthropic: Claude (ANTHROPIC_API_KEY, kostet je Abfrage, z. B. claude-haiku-5-5)
@@ -155,7 +170,7 @@ ai_bot:                      # KI-Konto: zweites Krypto-Papierkonto, ein Sprachm
   min_confidence: 0.6
 
 stocks:
-  enabled: true
+  enabled: false             # aus: Nutzer will nur Krypto per KI
   data_feed: iex             # iex: kostenlos in Echtzeit (eine US-Boerse), sip: alle Boersen (Alpaca-Abo)
   symbols: [AAPL, MSFT, NVDA, TSLA, AMZN, META, SPY, QQQ]
   timeframe: 5m              # 1m-Kerzen sind bei IEX lueckenhaft, 5m ist stabil
