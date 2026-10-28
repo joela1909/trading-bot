@@ -1,6 +1,6 @@
 // Service Worker: haelt die App-Huelle bereit, damit sie vom Startbildschirm schnell oeffnet.
 // Daten (/api/...) kommen immer frisch vom Bot und werden nie zwischengespeichert.
-const CACHE = 'tradingbot-v26';
+const CACHE = 'tradingbot-v27';
 const SHELL = [
   '/', '/static/app.css', '/static/app.js', '/static/icon.svg', '/manifest.webmanifest',
   '/static/vendor/lightweight-charts.standalone.production.js'

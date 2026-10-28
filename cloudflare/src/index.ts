@@ -67,7 +67,7 @@ async function handleAi(request: Request, env: Env): Promise<Response> {
     return new Response("model oder messages fehlen", { status: 400 });
   }
   try {
-    const input: Record<string, unknown> = { messages: body.messages, max_tokens: Math.min(body.max_tokens ?? 600, 4000) };
+    const input: Record<string, unknown> = { messages: body.messages, max_tokens: Math.min(body.max_tokens ?? 600, 10000) };
     if (body.response_format) input.response_format = body.response_format;
     const result = await env.AI.run(body.model as keyof AiModels, input as never);
     return Response.json({ result });

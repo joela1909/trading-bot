@@ -6,6 +6,7 @@ Kapitalverlauf sind die Summe, Positionen und Trades tragen ihren Zeitrahmen, de
 gewaehlten Zeitrahmens (mit dessen Linien und Trades)."""
 from __future__ import annotations
 
+import json
 import logging
 import threading
 from pathlib import Path
@@ -111,7 +112,24 @@ class MultiBot:
             return
         ai = p.cfg.ai
         guard = PortfolioGuard(self.all_bots, p.cfg.protections.max_same_direction, p.cfg.protections.reentry_block_minutes)
-        self.reflector = Reflector(p.strategy.advisor.complete_text, self.all_trades, self.ai_decisions,
+        from .ai import LESSONS_SCHEMA
+
+        advisor = p.strategy.advisor
+        from .reflection import _find_json
+
+        def ask(system: str, user: str) -> str:
+            # Denkmodelle schreiben manchmal nur Ueberlegungen ohne JSON: dann das Ersatzmodell, das das Format erzwingt
+            try:
+                text = advisor.complete_text(system, user, LESSONS_SCHEMA)
+            except Exception:  # noqa: BLE001
+                if advisor.backup is None:
+                    raise
+                text = ""
+            if _find_json(text) is None and advisor.backup is not None:
+                out = advisor.backup.complete(system, user, LESSONS_SCHEMA)
+                text = json.dumps(out) if isinstance(out, dict) else str(out or "")
+            return text
+        self.reflector = Reflector(ask, self.all_trades, self.ai_decisions,
                                    Path(p.state_path).with_name("ai_lessons.json"), ai.reflect_every, ai.reflect_trades, ai.max_lessons)
         before = p.before_cycle
 

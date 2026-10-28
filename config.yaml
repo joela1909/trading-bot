@@ -154,7 +154,7 @@ ai:
   gate_volume_min: 3.0       # nur mit mindestens dreifachem Volumen: ca. 18 Setups je Paar und Tag auf 1m
   position_check_every: 5    # offene Position auf diesen Zeitrahmen: KI jede 5. Kerze fragen
   reflect_every: 5            # nach je 5 neuen Trades arbeitet die KI ihre Fehler auf (Regeln stehen danach im Prompt)
-  reflect_trades: 40          # dafuer sieht sie ihre letzten 40 Trades samt Einstiegsgrund und Kennzahlen
+  reflect_trades: 30          # dafuer sieht sie ihre letzten 30 Trades samt Einstiegsgrund und Kennzahlen
   max_lessons: 6
   memory_trades: 8           # die KI sieht ihre letzten 8 Trades und soll daraus lernen
 

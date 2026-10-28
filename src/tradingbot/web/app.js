@@ -909,7 +909,8 @@
     box.appendChild(el('h2', 'group-title', 'Fehleranalyse der KI'));
     var card = el('div', 'card');
     if (!L.at) {
-      card.appendChild(el('p', 'footnote', 'Noch keine Analyse. Die KI wertet ihre Trades aus, sobald ' + L.next_in + ' weitere abgeschlossen sind.'));
+      card.appendChild(el('p', 'footnote', L.error ? 'Letzter Versuch fehlgeschlagen: ' + L.error + '. Neuer Versuch in 15 Minuten.'
+        : 'Noch keine Analyse. Die KI wertet ihre Trades aus, sobald ' + L.next_in + ' weitere abgeschlossen sind.'));
       box.appendChild(card);
       return;
     }

@@ -66,6 +66,23 @@ def test_reflector_ignores_unreadable_answer(tmp_path):
     trades = [(trade("BTC/USDT", "long", iso(i), iso(i + 5), -0.5), "1m") for i in range(5)]
     r = Reflector(lambda s, u: "keine Ahnung", lambda: trades, lambda: [], tmp_path / "l.json", every=5)
     assert not r.run() and r.lessons == [] and not r.due(), "nicht in jeder Runde neu fragen"
+    assert "ohne Regeln" in r.snapshot()["error"]
+    r._retry_at = 0
+    assert r.due(), "spaeter erneut versuchen"
+
+
+def test_workers_ai_uses_lessons_schema():
+    from tradingbot.ai import LESSONS_SCHEMA, WorkersAiClient
+    from tradingbot.config import AiConfig
+
+    sent = []
+    http = SimpleNamespace(post=lambda url, json, timeout: sent.append(json) or SimpleNamespace(
+        status_code=200, json=lambda: {"result": {"response": {"summary": "s", "lessons": ["a"]}}}))
+    c = WorkersAiClient(AiConfig(), url="http://ai", session=http)
+    assert c.complete("sys", "u", LESSONS_SCHEMA) == {"summary": "s", "lessons": ["a"]}
+    assert sent[0]["response_format"]["json_schema"] is LESSONS_SCHEMA
+    c.complete("sys", "u")
+    assert "action" in sent[1]["response_format"]["json_schema"]["properties"]
 
 
 def pos(symbol, side):
@@ -116,7 +133,7 @@ def test_multibot_learning_shares_memory_lessons_and_guard(settings, tmp_path):
         b.strategy = ClaudeAdvisorStrategy(StrategyConfig(name="claude_advisor", allow_short=True), AiConfig(gate_timeframes=[]),
                                            client=object(), timeframe=tf)
         b.strategy.advisor.ask = lambda p: prompts.append(p) or AiDecision("buy", 0.9, "Trend")
-        b.strategy.advisor.complete_text = lambda s, u: '{"summary": "x", "lessons": ["Keine Buendel"]}'
+        b.strategy.advisor.complete_text = lambda s, u, schema=None: '{"summary": "x", "lessons": ["Keine Buendel"]}'
         bots[tf] = b
     m = MultiBot(bots, "1h")
     m.enable_learning()

@@ -9,6 +9,7 @@ import json
 import logging
 import re
 import threading
+import time
 from collections import defaultdict
 from datetime import datetime, timezone
 from pathlib import Path
@@ -128,7 +129,7 @@ def describe(trade: Trade, tf: str, decisions: list[dict]) -> str:
     why = entry_reason(trade, decisions)
     return (f"{tf} {trade.symbol.split('/')[0]} {trade.side} {trade.opened_at[5:16]} -> {trade.closed_at[11:16]}: "
             f"{trade.pnl_pct:+.2f} % nach Kosten, Ausstieg {trade.reason[:40]}{stop}"
-            + (f". Einstiegsgrund: {why[:220]}" if why else ""))
+            + (f". Einstiegsgrund: {why[:150]}" if why else ""))
 
 
 def _find_json(text: str) -> dict | None:
@@ -157,6 +158,7 @@ class Reflector:
         self.every, self.window, self.max_lessons = every, window, max_lessons
         self.data: dict = {"lessons": [], "summary": "", "at": None, "analyzed": 0, "facts": []}
         self._busy = threading.Lock()
+        self._retry_at = 0.0  # nach einem Fehlschlag erst spaeter wieder fragen
         self._load()
 
     def _load(self) -> None:
@@ -177,7 +179,9 @@ class Reflector:
         return list(self.data.get("lessons") or [])
 
     def due(self) -> bool:
-        return self.every > 0 and len(self.trades()) - int(self.data.get("analyzed", 0)) >= self.every
+        if self.every <= 0 or time.time() < self._retry_at:
+            return False
+        return len(self.trades()) - int(self.data.get("analyzed", 0)) >= self.every
 
     def maybe_start(self) -> bool:
         """Startet die Analyse im Hintergrund, wenn genug neue Trades da sind (blockiert den Handel nicht)."""
@@ -208,25 +212,30 @@ class Reflector:
             try:
                 answer = self.ask(REFLECT_PROMPT.format(n=self.max_lessons), prompt)
             except Exception as exc:  # noqa: BLE001
-                log.warning("KI-Fehleranalyse fehlgeschlagen: %s", exc)
-                return False
+                return self._failed(f"KI nicht erreichbar ({str(exc)[:120]})")
             d = _find_json(answer or "")
             if d is None:
-                log.warning("KI-Fehleranalyse: Antwort ohne Regeln (%s)", (answer or "")[:120])
-                self.data["analyzed"] = total  # nicht in jeder Runde neu fragen
-                return False
+                return self._failed(f"Antwort ohne Regeln: {(answer or 'leer')[:160]}")
             lessons = [str(x).strip()[:300] for x in d["lessons"] if str(x).strip()][: self.max_lessons]
             self.data.update(lessons=lessons, summary=str(d.get("summary", ""))[:600], facts=facts,
                              at=datetime.now(timezone.utc).isoformat(timespec="seconds"), analyzed=total,
-                             trades_seen=min(total, self.window))
+                             trades_seen=min(total, self.window), error="")
             self._save()
             log.info("KI-Fehleranalyse: %d Regeln aus %d Trades", len(lessons), min(total, self.window))
             return True
         finally:
             self._busy.release()
 
+    RETRY_SECONDS = 900
+
+    def _failed(self, why: str) -> bool:
+        log.warning("KI-Fehleranalyse: %s", why)
+        self.data["error"] = why
+        self._retry_at = time.time() + self.RETRY_SECONDS  # nicht in jeder Runde neu fragen
+        return False
+
     def snapshot(self) -> dict:
-        return {k: self.data.get(k) for k in ("lessons", "summary", "at", "facts", "trades_seen")} | {
+        return {k: self.data.get(k) for k in ("lessons", "summary", "at", "facts", "trades_seen", "error")} | {
             "next_in": max(0, self.every - (len(self.trades()) - int(self.data.get("analyzed", 0)))),
         }
 

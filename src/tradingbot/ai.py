@@ -33,6 +33,14 @@ DECISION_SCHEMA = {
     "additionalProperties": False,
 }
 
+# Antwortformat der Fehleranalyse (Regeln statt Handelsentscheidung)
+LESSONS_SCHEMA = {
+    "type": "object",
+    "properties": {"summary": {"type": "string"}, "lessons": {"type": "array", "items": {"type": "string"}}},
+    "required": ["summary", "lessons"],
+    "additionalProperties": False,
+}
+
 SYSTEM_PROMPT = """Du bist der Entscheidungsteil eines automatischen Krypto-Handelsbots fuer den Spot-Handel.
 Pro neuer abgeschlossener Kerze bekommst du die Marktdaten eines Handelspaars und den Zustand der Position. Du entscheidest genau eine Aktion.
 
@@ -287,8 +295,8 @@ class ClaudeAdvisor:
             return AiDecision("hold", 0.0, f"KI-Fehler {exc.status_code}", ok=False)
         return self.parse(response)
 
-    def complete_text(self, system: str, user: str) -> str:
-        """Freie Textantwort (z. B. fuer die Fehleranalyse); zaehlt als KI-Aufruf, bei 429 das Ersatzmodell."""
+    def complete_text(self, system: str, user: str, schema: dict | None = None) -> str:
+        """Antwort in eigenem Format (z. B. LESSONS_SCHEMA fuer die Fehleranalyse); zaehlt als KI-Aufruf, bei 429 das Ersatzmodell."""
         self._roll_day()
         if self.calls >= self.cfg.max_calls_per_day:
             raise RuntimeError("Tageslimit der KI-Aufrufe erreicht")
@@ -296,12 +304,12 @@ class ClaudeAdvisor:
         if isinstance(self.client, (WorkersAiClient, OpenRouterClient)):
             client = self.backup if self.backup is not None and self.limited_day == self.day else self.client
             try:
-                out = client.complete(system, user)
+                out = client.complete(system, user, schema)
             except Exception as exc:  # noqa: BLE001
                 if "429" not in str(exc) or self.backup is None or client is self.backup:
                     raise
                 self.limited_day = self.day
-                out = self.backup.complete(system, user)
+                out = self.backup.complete(system, user, schema)
             return json.dumps(out) if isinstance(out, dict) else str(out or "")
         response = self.client.messages.create(model=self.cfg.model, max_tokens=self.cfg.max_tokens, system=system,
                                                messages=[{"role": "user", "content": user}])
@@ -363,16 +371,16 @@ class WorkersAiClient:
         self.url = url or os.environ.get("TRADINGBOT_AI_URL", "")
         self.http = session or requests.Session()
 
-    def complete(self, system: str, user: str) -> str | dict:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str | dict:
         if not self.url:
             raise RuntimeError("Workers AI nur auf Cloudflare verfuegbar (TRADINGBOT_AI_URL fehlt)")
         body = {
             "model": self.cfg.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": 3000,  # Denkmodelle brauchen Platz fuer Ueberlegungen vor der Antwort
-            "response_format": {"type": "json_schema", "json_schema": DECISION_SCHEMA},
+            "max_tokens": 8000 if schema else 3000,  # Denkmodelle brauchen Platz fuer Ueberlegungen vor der Antwort
+            "response_format": {"type": "json_schema", "json_schema": schema or DECISION_SCHEMA},
         }
-        r = self.http.post(self.url, json=body, timeout=self.cfg.timeout_seconds)
+        r = self.http.post(self.url, json=body, timeout=max(self.cfg.timeout_seconds, 300.0) if schema else self.cfg.timeout_seconds)
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
         data = r.json()
@@ -402,15 +410,18 @@ class OpenRouterClient:
         self.http = session or requests.Session()
         self.http.headers.update({"Authorization": f"Bearer {api_key}", "X-Title": "Trading Bot"})
 
-    def complete(self, system: str, user: str) -> str:
+    def complete(self, system: str, user: str, schema: dict | None = None) -> str:
         body = {
             "model": self.cfg.model,
             "messages": [{"role": "system", "content": system}, {"role": "user", "content": user}],
-            "max_tokens": 4000,
+            "max_tokens": 8000 if schema else 4000,
         }
+        if schema:
+            # eigenes Antwortformat (Fehleranalyse): Modelle, die es koennen, halten es ein; mehr Platz fuers Denken
+            body["response_format"] = {"type": "json_schema", "json_schema": {"name": "answer", "strict": True, "schema": schema}}
         if self.cfg.fallback_models:
             body["models"] = [self.cfg.model, *self.cfg.fallback_models]
-        r = self.http.post(self.URL, json=body, timeout=self.cfg.timeout_seconds)
+        r = self.http.post(self.URL, json=body, timeout=max(self.cfg.timeout_seconds, 300.0) if schema else self.cfg.timeout_seconds)
         if r.status_code >= 400:
             raise RuntimeError(f"HTTP {r.status_code}: {r.text[:150]}")
         data = r.json()
