@@ -28,6 +28,7 @@ class ClaudeAdvisorStrategy(Strategy):
         self.timeframe = timeframe or ""
         self.gated = self.timeframe in ai.gate_timeframes  # Vorauswahl: KI nur bei Setups fragen
         self._levels: tuple[str, float | None, float | None] | None = None  # (Richtung, Stop, Ziel) der letzten KI-Antwort
+        self.cost_pct = 0.0  # Kosten je Trade hin und zurueck in %, setzt der Bot
         self.advisor = ClaudeAdvisor(ai, api_key=api_key, client=client, futures=cfg.allow_short)
 
     @property
@@ -98,6 +99,9 @@ class ClaudeAdvisorStrategy(Strategy):
                 if self.timeframe_ms and (ts // self.timeframe_ms) % self.ai.position_check_every:
                     return Decision(Signal.HOLD, "Position laeuft, KI prueft jede "
                                     f"{self.ai.position_check_every}. Kerze", atr=atr_value)
+        if position is None:
+            close_now = float(df["close"].iloc[-1])
+            context = {**context, "min_stop_pct": self.min_stop_pct(close_now, atr_value), "min_rr": self.ai.min_rr}
         prompt = build_user_prompt(symbol, context.get("timeframe", "?"), context.get("quote", ""), df, context, self.ai.candles_in_prompt)
         d: AiDecision = self.advisor.ask(prompt)
         self._levels = None
@@ -143,17 +147,29 @@ class ClaudeAdvisorStrategy(Strategy):
             return Decision(Signal.HOLD, f"KI: {d.reason}", stop_loss=d.stop_loss, take_profit=d.take_profit, atr=atr_value, adjust=True)
         return Decision(Signal.HOLD, f"KI: {d.reason}", atr=atr_value)
 
+    def min_stop_pct(self, entry: float, atr_value: float) -> float:
+        """Kleinster erlaubter Stop-Abstand in %: aus ATR (Rauschen) und Kosten je Trade."""
+        atr_pct = atr_value / entry * 100.0 if entry and atr_value == atr_value else 0.0
+        return max(self.ai.min_stop_atr * atr_pct, self.ai.min_stop_cost_mult * self.cost_pct, self.MIN_STOP_PCT)
+
     def entry_plan(self, df, i, side, entry, atr_value):
-        """Stop und Ziel der KI, wenn sie zur Richtung passen und vernuenftig weit weg sind; sonst der eigene Plan."""
+        """Stop und Ziel der KI, wenn sie zur Richtung passen und vernuenftig weit weg sind; sonst der eigene Plan.
+        Danach Untergrenze: Stop mindestens min_stop_pct weit, Ziel mindestens min_rr x Stop-Abstand."""
+        sign = -1 if side == "short" else 1
+        stop, tp = None, None
         lv = self._levels
         if lv is not None and lv[0] == side and lv[1]:
-            sign = -1 if side == "short" else 1
-            stop, tp = lv[1], lv[2]
-            dist = sign * (entry - stop) / entry * 100.0
-            tp_ok = tp is None or sign * (tp - entry) > 0
+            dist = sign * (entry - lv[1]) / entry * 100.0
+            tp_ok = lv[2] is None or sign * (lv[2] - entry) > 0
             if self.MIN_STOP_PCT <= dist <= self.MAX_STOP_PCT and tp_ok:
-                return stop, tp
-        return super().entry_plan(df, i, side, entry, atr_value)
+                stop, tp = lv[1], lv[2]
+        if stop is None:
+            stop, tp = super().entry_plan(df, i, side, entry, atr_value)
+        dist = max(sign * (entry - stop), entry * self.min_stop_pct(entry, atr_value) / 100.0)
+        stop = entry - sign * dist
+        if self.ai.min_rr > 0 and (tp is None or sign * (tp - entry) < self.ai.min_rr * dist):
+            tp = entry + sign * self.ai.min_rr * dist
+        return stop, tp
 
     def export_state(self) -> dict:
         return {"ai": self.advisor.export_state()}

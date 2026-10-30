@@ -151,6 +151,11 @@ class ProtectionConfig(BaseModel):
     # einmal offen; nach einem Stop im selben Paar so viele Minuten kein Einstieg in dieselbe Richtung (0 = aus)
     max_same_direction: int = Field(default=3, ge=0, le=50)
     reentry_block_minutes: int = Field(default=60, ge=0, le=1440)
+    # Leistungsbremse je Zeitrahmen und Richtung: haben die letzten perf_window Trades (mind. perf_min_trades) im
+    # Schnitt verloren, keine neuen Einstiege dort; nach perf_probe_hours ohne Trade ein Probe-Trade (0 = aus)
+    perf_window: int = Field(default=15, ge=0, le=200)
+    perf_min_trades: int = Field(default=8, ge=1, le=200)
+    perf_probe_hours: float = Field(default=12.0, ge=0.0, le=720.0)
 
 
 class ExecutionConfig(BaseModel):
@@ -184,6 +189,11 @@ class AiConfig(BaseModel):
     # Fehleranalyse: nach je reflect_every neuen Trades (alle Zeitrahmen) wertet die KI ihre letzten reflect_trades
     # Trades aus und schreibt hoechstens max_lessons Regeln, die danach in jeder Anfrage stehen (0 = aus)
     reflect_every: int = Field(default=5, ge=0, le=100)
+    # Stop der KI mindestens min_stop_atr x ATR und min_stop_cost_mult x Kosten vom Kurs (sonst weiter gesetzt),
+    # Ziel mindestens min_rr x Stop-Abstand: enge Stops verlieren sonst fast nur an Rauschen und Gebuehren
+    min_stop_atr: float = Field(default=1.5, ge=0.0, le=10.0)
+    min_stop_cost_mult: float = Field(default=3.0, ge=0.0, le=20.0)
+    min_rr: float = Field(default=1.5, ge=0.0, le=10.0)
     reflect_trades: int = Field(default=40, ge=5, le=200)
     max_lessons: int = Field(default=6, ge=1, le=12)
 

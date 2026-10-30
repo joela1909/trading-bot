@@ -244,15 +244,54 @@ class PortfolioGuard:
     """Schutz ueber alle Zeitrahmen-Konten: ein Paar nur einmal offen, begrenzte Wetten in dieselbe Richtung
     und kein Wiedereinstieg in dieselbe Richtung kurz nach einem Stop."""
 
-    def __init__(self, bots: Callable[[], list], max_same_direction: int = 3, reentry_minutes: int = 60):
+    def __init__(self, bots: Callable[[], list], max_same_direction: int = 3, reentry_minutes: int = 60,
+                 trades: Callable[[], list] | None = None, perf_window: int = 0, perf_min_trades: int = 8,
+                 perf_probe_hours: float = 12.0):
         self.bots = bots
         self.max_same = max_same_direction
         self.reentry = reentry_minutes
+        self.trades = trades  # () -> [(Trade, Zeitrahmen)] aller Konten, fuer die Leistungsbremse
+        self.perf_window, self.perf_min, self.probe_h = perf_window, perf_min_trades, perf_probe_hours
 
-    def __call__(self, symbol: str, side: str) -> tuple[bool, str]:
+    def performance(self, tf: str, side: str) -> tuple[bool, str]:
+        """Leistungsbremse: (gesperrt, Grund) fuer Zeitrahmen + Richtung nach den letzten perf_window Trades."""
+        if not self.perf_window or self.trades is None:
+            return False, ""
+        bucket = [t for t, ttf in self.trades() if ttf == tf and t.side == side][-self.perf_window:]
+        if len(bucket) < self.perf_min:
+            return False, ""
+        avg = sum(t.pnl_pct for t in bucket) / len(bucket)
+        if avg >= 0:
+            return False, ""
+        ago_h = (datetime.now(timezone.utc) - parse_iso(bucket[-1].closed_at)).total_seconds() / 3600
+        if self.probe_h and ago_h >= self.probe_h:
+            return False, ""  # lange kein Trade: ein Probe-Trade, damit sich die Bilanz erholen kann
+        wins = sum(1 for t in bucket if t.pnl_pct > 0)
+        name = "Shorts" if side == "short" else "Longs"
+        wait = f", Probe-Trade in {self.probe_h - ago_h:.0f} h" if self.probe_h else ""
+        return True, (f"{tf}-{name} gebremst: letzte {len(bucket)} im Schnitt {avg:+.2f} %, {wins} Gewinner{wait}")
+
+    def blocked_buckets(self, timeframes: list[str]) -> list[str]:
+        return [why for tf in timeframes for side in ("long", "short") for blocked, why in [self.performance(tf, side)] if blocked]
+
+    def precheck(self, symbol: str, tf: str, short_allowed: bool = True) -> tuple[bool, str]:
+        """Vor der KI-Abfrage: Paar schon offen oder beide Richtungen gebremst -> gar nicht erst fragen."""
+        if any(symbol in b.state.positions for b in self.bots()):
+            return False, f"{symbol.split('/')[0]} ist in einem anderen Zeitrahmen schon offen"
+        sides = ("long", "short") if short_allowed else ("long",)
+        reasons = [why for side in sides for blocked, why in [self.performance(tf, side)] if blocked]
+        if len(reasons) == len(sides):
+            return False, "; ".join(reasons)
+        return True, ""
+
+    def __call__(self, symbol: str, side: str, tf: str | None = None) -> tuple[bool, str]:
         positions = [p for b in self.bots() for p in b.state.positions.values()]
         if any(p.symbol == symbol for p in positions):
             return False, f"{symbol.split('/')[0]} ist in einem anderen Zeitrahmen schon offen"
+        if tf is not None:
+            blocked, why = self.performance(tf, side)
+            if blocked:
+                return False, why
         same = sum(1 for p in positions if p.side == side)
         if self.max_same and same >= self.max_same:
             return False, f"schon {same} {'Shorts' if side == 'short' else 'Longs'} offen (Grenze {self.max_same}, sonst eine Wette mehrfach)"

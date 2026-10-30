@@ -184,6 +184,9 @@ def build_user_prompt(symbol: str, timeframe: str, quote: str, df: pd.DataFrame,
     if context.get("cost_pct"):
         cost = float(context["cost_pct"])
         stats.append(f"Kosten je Trade hin und zurueck: {cost:.2f} % (Gebuehren + Kursabweichung). Ziel mindestens {3 * cost:.2f} % entfernt")
+    if context.get("min_stop_pct"):
+        stats.append(f"Stop mindestens {float(context['min_stop_pct']):.2f} % vom Kurs (engere Stops setzt der Bot weiter), "
+                     f"Ziel mindestens {float(context.get('min_rr') or 0):.1f}x so weit wie der Stop. Lohnt sich das nicht: hold")
     for label, minutes in (("15m", 15), ("1h", 60)):
         tr = _htf_trend(df, minutes)
         if tr:

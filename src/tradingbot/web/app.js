@@ -915,6 +915,7 @@
       return;
     }
     if (L.summary) card.appendChild(el('p', '', L.summary));
+    (L.blocked || []).forEach(function (x) { card.appendChild(el('p', 'footnote', 'Gebremst: ' + x)); });
     var list = el('div', 'list');
     (L.lessons || []).forEach(function (x) {
       var r = el('div', 'row');

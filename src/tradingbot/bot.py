@@ -72,6 +72,10 @@ class TradingBot:
         # Gedaechtnis ueber alle Zeitrahmen (MultiBot): () -> [(Trade, Zeitrahmen)], und Lehren der Fehleranalyse
         self.trade_memory = None
         self.lessons = None
+        # Vorpruefung vor der Strategie (spart KI-Aufrufe): Paar -> (erlaubt, Grund), z. B. Leistungsbremse aller Konten
+        self.entry_precheck = None
+        if hasattr(self.strategy, "cost_pct"):
+            self.strategy.cost_pct = 2.0 * (self.cfg.paper.fee_pct + self.cfg.paper.slippage_pct)
         # wird zu Beginn jeder Runde aufgerufen, z. B. um die Aktienliste des Tages zu erneuern
         self.before_cycle = None
         # Echtzeit: (Kerze, Richtung) des letzten Ausstiegs je Paar, "any" nach einem Einstieg
@@ -521,9 +525,18 @@ class TradingBot:
         equity = self.equity(prices) if prices else (self.state.day_start_equity or 0.0)
         self._roll_day(equity)
 
-        for symbol in self.cfg.symbols:
+        slow = getattr(self.strategy, "live_only", False)
+        for n, symbol in enumerate(self.cfg.symbols):
             if symbol not in prices:
                 continue
+            if slow and n:
+                # KI-Abfragen dauern: vor jedem weiteren Paar Stops/Ziele aller offenen Positionen mit frischem Kurs
+                # pruefen und den Kurs dieses Paars neu holen (sonst laufen Stops minutenlang unbeachtet durch)
+                self._check_exits(prices)
+                try:
+                    prices[symbol] = self.feed.fetch_price(symbol)
+                except Exception:  # noqa: BLE001
+                    pass
             try:
                 self.process_symbol(symbol, prices[symbol])
             except Exception:  # noqa: BLE001
@@ -592,6 +605,22 @@ class TradingBot:
             return None
         live = live[live["timestamp"] > after_ts]
         return live if not live.empty else None
+
+    def _check_exits(self, prices: dict[str, float]) -> None:
+        """Nur Stop und Ziel der offenen Positionen mit aktuellem Kurs pruefen (ohne Strategie, ohne KI)."""
+        for symbol, pos in list(self.state.positions.items()):
+            try:
+                price = self.feed.fetch_price(symbol)
+            except Exception:  # noqa: BLE001
+                continue
+            prices[symbol] = price
+            try:
+                if pos.stop_hit(price):
+                    self._close_position(symbol, pos, "stop_loss")
+                elif pos.take_profit_hit(price):
+                    self._close_position(symbol, pos, "take_profit")
+            except Exception:  # noqa: BLE001
+                log.exception("Fehler beim Stop von %s", symbol)
 
     def process_symbol(self, symbol: str, price: float) -> None:
         raw = self._fetch_candles(symbol)
@@ -873,6 +902,15 @@ class TradingBot:
             log.info("%s: kein Einstieg, max. offene Positionen erreicht", symbol)
             self._status[symbol] = "Kein Einstieg: maximale Zahl offener Positionen erreicht"
             return
+        if self.entry_precheck is not None:
+            try:
+                allowed, why = self.entry_precheck(symbol)
+            except Exception as exc:  # noqa: BLE001
+                log.debug("%s: Vorpruefung fehlgeschlagen (%s)", symbol, exc)
+                allowed = True
+            if not allowed:
+                self._status[symbol] = f"Kein Einstieg: {why}"
+                return
         decision = self.strategy.decide(df, context=self._context(symbol, price, None))
         is_short = decision.signal == Signal.SHORT
         if decision.signal != Signal.BUY and not (is_short and self.cfg.strategy.allow_short):

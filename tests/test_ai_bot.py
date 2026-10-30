@@ -67,7 +67,7 @@ def test_ai_sets_stop_and_target_and_adjusts_open_position(settings, tmp_path):
     from tests.test_bot import _make_bot
 
     s = ClaudeAdvisorStrategy(StrategyConfig(name="claude_advisor", allow_short=True, stop_atr_mult=2.0, take_profit_atr_mult=4.0),
-                              AiConfig(), client=object())
+                              AiConfig(min_stop_atr=0, min_stop_cost_mult=0, min_rr=0), client=object())
     df = s.prepare(make_ohlcv(trend_closes()))
     close = float(df["close"].iloc[-1])
     s.advisor.ask = lambda p: AiDecision("buy", 0.8, "Sweep", stop_loss=close * 0.99, take_profit=close * 1.03)

@@ -145,3 +145,59 @@ def test_multibot_learning_shares_memory_lessons_and_guard(settings, tmp_path):
     bots["4h"].run_once()
     assert "BTC/USDT" not in bots["4h"].state.positions, "dasselbe Paar nicht in zwei Zeitrahmen"
     assert m.get_snapshot()["lessons"]["lessons"] == ["Keine Buendel"]
+
+
+def test_ai_stop_floor_from_atr_and_costs_and_min_rr():
+    from tradingbot.ai import AiDecision
+    from tradingbot.config import AiConfig, StrategyConfig
+    from tradingbot.strategy.claude_advisor import ClaudeAdvisorStrategy
+    from tests.conftest import make_ohlcv, trend_closes
+
+    s = ClaudeAdvisorStrategy(StrategyConfig(name="claude_advisor", allow_short=True),
+                              AiConfig(min_stop_atr=0.0, min_stop_cost_mult=3.0, min_rr=1.5), client=object())
+    s.cost_pct = 0.22
+    df = s.prepare(make_ohlcv(trend_closes()))
+    close = float(df["close"].iloc[-1])
+    prompts = []
+    s.advisor.ask = lambda p: prompts.append(p) or AiDecision("short", 0.9, "x", stop_loss=close * 1.004, take_profit=close * 0.997)
+    d = s.decide(df, context={"symbol": "BTC", "position": None})
+    assert abs(d.stop_loss / close - 1.0066) < 1e-9, "0,40 % zu eng: auf 3 x 0,22 % gesetzt"
+    assert abs(1 - d.take_profit / close - 1.5 * 0.0066) < 1e-9, "Ziel mindestens 1,5 x Stop"
+    assert "Stop mindestens 0.66 %" in prompts[0]
+    s.advisor.ask = lambda p: AiDecision("buy", 0.9, "x", stop_loss=close * 0.98, take_profit=close * 1.05)
+    d = s.decide(df, context={"symbol": "BTC", "position": None})
+    assert abs(d.stop_loss - close * 0.98) < 1e-9 and abs(d.take_profit - close * 1.05) < 1e-9, "weite Werte bleiben"
+
+
+def test_performance_brake_per_timeframe_and_side_with_probe():
+    now = datetime.now(timezone.utc)
+
+    def t(side, pnl, h):
+        return (trade("BTC/USDT", side, (now - timedelta(hours=h + 0.2)).isoformat(), (now - timedelta(hours=h)).isoformat(), pnl), "1m")
+
+    hist = [t("short", -0.5, 1 + i) for i in range(10)] + [t("long", 0.4, 2), (trade("ETH/USDT", "short", iso(0), iso(5), 1.0), "1h")]
+    bots = [bot()]
+    g = PortfolioGuard(lambda: bots, 0, 0, trades=lambda: hist, perf_window=15, perf_min_trades=8, perf_probe_hours=12)
+    blocked, why = g.performance("1m", "short")
+    assert blocked and "1m-Shorts gebremst" in why and "0 Gewinner" in why
+    assert not g.performance("1m", "long")[0] and not g.performance("1h", "short")[0], "zu wenig Trades / andere Richtung"
+    assert not g("XRP/USDT", "short", "1m")[0] and g("XRP/USDT", "long", "1m")[0]
+    assert g.precheck("XRP/USDT", "1m")[0], "Long noch moeglich: KI fragen"
+    hist += [t("long", -0.6, 1.5 + i * 0.01) for i in range(9)]
+    ok, why2 = g.precheck("XRP/USDT", "1m")
+    assert not ok and "Longs" in why2 and "Shorts" in why2, "beide Richtungen gebremst: KI nicht fragen"
+    old = [t("short", -0.5, 13 + i) for i in range(10)]
+    g2 = PortfolioGuard(lambda: bots, 0, 0, trades=lambda: old, perf_window=15, perf_min_trades=8, perf_probe_hours=12)
+    assert not g2.performance("1m", "short")[0], "nach 12 h ohne Trade ein Probe-Trade"
+
+
+def test_stop_checked_between_slow_ai_symbols(settings, tmp_path):
+    from tests.conftest import FakeFeed, make_ohlcv, trend_closes
+    from tests.test_bot import _make_bot
+
+    b, _, _ = _make_bot(settings, FakeFeed(make_ohlcv(trend_closes())), tmp_path)
+    price = b.feed.fetch_price("BTC/USDT")
+    b.broker.open_position("BTC/USDT", "long", 0.01)
+    b.state.positions["BTC/USDT"] = Position("BTC/USDT", 0.01, price * 1.1, price * 1.05, None, iso(0), price * 1.1)
+    b._check_exits({})
+    assert "BTC/USDT" not in b.state.positions and b.state.trades[-1].reason == "stop_loss"

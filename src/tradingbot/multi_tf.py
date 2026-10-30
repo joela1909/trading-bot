@@ -111,7 +111,10 @@ class MultiBot:
         if not getattr(p.strategy, "live_only", False):
             return
         ai = p.cfg.ai
-        guard = PortfolioGuard(self.all_bots, p.cfg.protections.max_same_direction, p.cfg.protections.reentry_block_minutes)
+        pr = p.cfg.protections
+        guard = PortfolioGuard(self.all_bots, pr.max_same_direction, pr.reentry_block_minutes, trades=self.all_trades,
+                               perf_window=pr.perf_window, perf_min_trades=pr.perf_min_trades, perf_probe_hours=pr.perf_probe_hours)
+        self.guard = guard
         from .ai import LESSONS_SCHEMA
 
         advisor = p.strategy.advisor
@@ -138,10 +141,11 @@ class MultiBot:
                 before()
             self.reflector.maybe_start()
         p.before_cycle = cycle
-        for b in self.all_bots():
+        for tf, b in self.bots.items():
             b.trade_memory = self.all_trades
             b.lessons = lambda: self.reflector.lessons
-            b.entry_guard = chain_guards(b.entry_guard, guard)
+            b.entry_guard = chain_guards(b.entry_guard, lambda s, d, tf=tf: guard(s, d, tf))
+            b.entry_precheck = lambda s, tf=tf, b=b: guard.precheck(s, tf, b.cfg.strategy.allow_short)
 
     def open_symbols(self) -> set[str]:
         return {s for b in self.all_bots() for s in b.state.positions}
@@ -247,7 +251,8 @@ class MultiBot:
             equity_history=downsample(merged),
             market_by_timeframe={tf: s.get("market", []) for tf, s in snaps.items()},
             timeframes=self.timeframes,
-            lessons=self.reflector.snapshot() if getattr(self, "reflector", None) else None,
+            lessons=({**self.reflector.snapshot(), "blocked": self.guard.blocked_buckets(self.timeframes)}
+                     if getattr(self, "reflector", None) else None),
             accounts=[{"timeframe": tf, "equity": s.get("equity"), "return_pct": s.get("return_pct"),
                        "positions": len(s.get("positions", [])), "trades": len(self.bots[tf].state.trades),
                        "last_cycle": s.get("last_cycle")} for tf, s in snaps.items()],
